@@ -109,6 +109,11 @@ import {
   ushioOrderedListSchema,
 } from './md-fidelity.mjs';
 import { lazyCodeBlockView, mountAllLazyCodeBlocks } from './lazy-code-block.mjs';
+// T-11: Mermaid 图（@milkdown/plugin-diagram 负责解析 ```mermaid 代码块为 diagram 节点，
+// 该插件无内置 nodeView，由下方 diagramView 用 mermaid.run 渲染 SVG）
+import { diagram, diagramSchema } from '@milkdown/plugin-diagram';
+import { $view } from '@milkdown/utils';
+import mermaid from 'mermaid';
 import {
   LOCAL_FILE_SCHEME,
   toAbsoluteLocalPath,
@@ -302,12 +307,65 @@ try {
 const KNOWN_CODE_LANGUAGES = Object.keys(refractor.languages)
   .filter((name) => typeof name === 'string' && /^[a-z0-9_+-]+$/i.test(name))
   .sort((a, b) => a.localeCompare(b));
-const RUNTIME_BUILD_TAG = 'lang-inline-v2-20260324-2114';
+const RUNTIME_BUILD_TAG = 'mermaid-footnote-v2-20261029-2114';
 window.__USHIO_RUNTIME_TAG = RUNTIME_BUILD_TAG;
 const KNOWN_CODE_LANGUAGE_MAP = new Map(
   KNOWN_CODE_LANGUAGES.map((name) => [name.trim().toLowerCase(), name]),
 );
 setKnownCodeLanguages(KNOWN_CODE_LANGUAGES);
+
+// T-11: Mermaid 图 nodeView（@milkdown/plugin-diagram@7.7.0 仅提供 schema/解析，
+// 无内置渲染视图；这里用 mermaid.run 渲染 SVG，并做串行渲染防抖避免并发冲突）
+const diagramView = $view(diagramSchema, () => (node) => {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'ushio-diagram';
+  wrapper.setAttribute('contenteditable', 'false');
+  const mermaidHost = document.createElement('div');
+  mermaidHost.className = 'mermaid';
+  wrapper.appendChild(mermaidHost);
+
+  let renderQueued = false;
+  let renderBusy = false;
+  const render = () => {
+    if (renderBusy) {
+      renderQueued = true;
+      return;
+    }
+    renderBusy = true;
+    renderQueued = false;
+    const code = node.attrs.value || '';
+    mermaidHost.textContent = code;
+    wrapper.classList.remove('ushio-diagram-error');
+    if (!code.trim()) {
+      wrapper.classList.add('ushio-diagram-empty');
+      renderBusy = false;
+      return;
+    }
+    mermaid
+      .run({ nodes: [mermaidHost] })
+      .catch(() => {
+        wrapper.classList.add('ushio-diagram-error');
+      })
+      .finally(() => {
+        renderBusy = false;
+        if (renderQueued) render();
+      });
+  };
+  render();
+
+  return {
+    dom: wrapper,
+    update: (updatedNode) => {
+      if (updatedNode.attrs.value !== node.attrs.value) {
+        node = updatedNode;
+        render();
+      }
+      return true;
+    },
+    stopEvent: () => true,
+    ignoreMutation: () => true,
+  };
+});
 
 const nextRequestId = () => `${Date.now()}-${++bridgeSeq}`;
 
@@ -2904,6 +2962,11 @@ const createEditor = async () => {
       }));
     })
     .use(automd)
+    // T-11: Mermaid 与脚注支持。diagram 将 ```mermaid 代码块解析为 diagram 节点，
+    // diagramView 负责渲染 SVG；脚注由 Crepe 内置的 gfm 预设提供（footnote_reference /
+    // footnote_definition 节点，无需额外插件），此处样式见 style.css 脚注小节。
+    .use(diagram)
+    .use(diagramView)
     .use([emojiAttr, remarkEmojiPlugin, emojiSchema])
     .use([remarkHtmlBlockFence, ushioHtmlBlockSchema])
     // 覆盖同名 schema：修 round-trip 改写（图片 alt、列表紧凑度与起始号）。

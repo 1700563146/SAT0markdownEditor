@@ -1040,3 +1040,70 @@ body {
   background: color-mix(in srgb, var(--milkdown-color-surface) 95%, #000000 5%);
   border-color: color-mix(in srgb, var(--milkdown-color-outline) 50%, transparent);
 }
+
+/* ===== T-11: Mermaid 图（plugin-diagram 解析 + 自定义 nodeView 渲染） ===== */
+.ushio-diagram {
+  margin: 12px 0;
+  padding: 12px 16px;
+  border: 1px solid var(--milkdown-color-outline, #d0d7de);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--milkdown-color-surface, #ffffff) 92%, transparent);
+  overflow-x: auto;
+}
+
+.ushio-diagram .mermaid {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 40px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--milkdown-color-on-surface, #1f2328);
+}
+
+.ushio-diagram-empty .mermaid::before {
+  content: '(空 Mermaid 图)';
+  opacity: 0.5;
+}
+
+.ushio-diagram-error .mermaid {
+  color: #c62828;
+}
+
+:root[data-theme-mode='dark'] .ushio-diagram {
+  border-color: #3d444d;
+  background: color-mix(in srgb, var(--milkdown-color-surface, #0d1117) 92%, transparent);
+}
+
+:root[data-theme-mode='dark'] .ushio-diagram-error .mermaid {
+  color: #ff8a80;
+}
+
+/* ===== T-11: 脚注（gfm preset：footnote_reference / footnote_definition） ===== */
+sup[data-type='footnote_reference'] {
+  font-size: 0.72em;
+  line-height: 0;
+  vertical-align: super;
+  color: var(--milkdown-color-primary, #0969da);
+  cursor: pointer;
+}
+
+dl[data-type='footnote_definition'] {
+  margin: 12px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--milkdown-color-outline, #d0d7de);
+  font-size: 0.9em;
+  color: color-mix(in srgb, var(--milkdown-color-on-surface, #1f2328) 82%, transparent);
+}
+
+dl[data-type='footnote_definition'] dt {
+  display: inline-block;
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+dl[data-type='footnote_definition'] dd {
+  display: inline;
+  margin: 0;
+}

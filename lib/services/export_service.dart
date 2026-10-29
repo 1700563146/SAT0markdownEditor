@@ -27,6 +27,9 @@ class ExportService {
   static final _tableRowRegex = RegExp(r'^\s*\|?.*\|.*\|?\s*$');
   static final _tableDividerRegex = RegExp(r'^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$');
   static final _hrRegex = RegExp(r'^\s*([-*_])\1{2,}\s*$');
+  // T-11: 脚注支持（引用 [^label] 与定义 ^[label]: content）。
+  static final _footnoteRefRegex = RegExp(r'\[\^([^\]]+)\]');
+  static final _footnoteDefRegex = RegExp(r'^\[\^([^\]]+)\]:\s*(.+)$');
 
   /// Share PNG bytes as an image file.
   static Future<bool> sharePngBytes(
@@ -169,6 +172,15 @@ class ExportService {
     final widgets = <pw.Widget>[];
     int i = 0;
 
+    // T-11: 收集脚注定义（^[label]: content），正文中跳过、末尾统一列出。
+    final footnoteDefs = <String, String>{};
+    for (final l in lines) {
+      final fm = _footnoteDefRegex.firstMatch(l.trim());
+      if (fm != null) {
+        footnoteDefs[fm.group(1)!.trim()] = _stripInlineMarkdown(fm.group(2)!);
+      }
+    }
+
     while (i < lines.length) {
       final line = lines[i];
       final trimmed = line.trim();
@@ -180,13 +192,19 @@ class ExportService {
 
       if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
         final fence = trimmed.startsWith('~~~') ? '~~~' : '```';
+        final langMatch =
+            RegExp(r'^`{3,}\s*([^\s`]+)').firstMatch(trimmed) ??
+                RegExp(r'^~{3,}\s*([^\s~]+)').firstMatch(trimmed);
+        final lang = langMatch?.group(1)?.toLowerCase() ?? '';
+        // T-11: mermaid 块在 PDF 中以标注形式导出（无法离线渲染 SVG，保留源码）。
+        final isMermaid = lang == 'mermaid';
         int end = i + 1;
         while (end < lines.length && !lines[end].trim().startsWith(fence)) {
           end++;
         }
         final safeEnd = end.clamp(0, lines.length).toInt();
         final code = lines.sublist(i + 1, safeEnd).join('\n');
-        widgets.add(_buildCodeBlock(code, font));
+        widgets.add(_buildCodeBlock(code, font, isMermaid: isMermaid));
         i = end < lines.length ? end + 1 : lines.length;
         continue;
       }
@@ -302,6 +320,7 @@ class ExportService {
       while (end < lines.length) {
         final t = lines[end].trim();
         if (t.isEmpty ||
+            _footnoteDefRegex.hasMatch(t) ||
             _headingRegex.hasMatch(t) ||
             _orderedListRegex.hasMatch(t) ||
             _unorderedListRegex.hasMatch(t) ||
@@ -326,6 +345,27 @@ class ExportService {
         );
       }
       i = end > i ? end : i + 1;
+    }
+
+    // T-11: 脚注定义统一输出到文档末尾。
+    if (footnoteDefs.isNotEmpty) {
+      widgets.add(
+        pw.Padding(
+          padding: const pw.EdgeInsets.only(top: 12, bottom: 6),
+          child: pw.Text('脚注', style: pw.TextStyle(font: boldFont, fontSize: 14)),
+        ),
+      );
+      for (final entry in footnoteDefs.entries) {
+        widgets.add(
+          pw.Padding(
+            padding: const pw.EdgeInsets.only(left: 8, bottom: 4),
+            child: pw.Text(
+              '[${entry.key}] ${entry.value}',
+              style: pw.TextStyle(font: font, fontSize: 10.5, height: 1.4),
+            ),
+          ),
+        );
+      }
     }
 
     return widgets;
@@ -388,6 +428,10 @@ class ExportService {
     return text
         .replaceAllMapped(RegExp(r'`([^`]+)`'), (match) => match.group(1) ?? '')
         .replaceAllMapped(
+          _footnoteRefRegex,
+          (match) => '[${match.group(1) ?? ''}]',
+        )
+        .replaceAllMapped(
           RegExp(r'\*\*([^*]+)\*\*'),
           (match) => match.group(1) ?? '',
         )
@@ -419,8 +463,8 @@ class ExportService {
   }
   
   /// 构建代码块
-  static pw.Widget _buildCodeBlock(String code, pw.Font font) {
-    return pw.Container(
+  static pw.Widget _buildCodeBlock(String code, pw.Font font, {bool isMermaid = false}) {
+    final codeWidget = pw.Container(
       width: double.infinity,
       padding: const pw.EdgeInsets.all(12),
       margin: const pw.EdgeInsets.symmetric(vertical: 8),
@@ -432,6 +476,18 @@ class ExportService {
         code,
         style: pw.TextStyle(font: font, fontSize: 10),
       ),
+    );
+    if (!isMermaid) return codeWidget;
+    // T-11: mermaid 图无法在离线 PDF 中渲染 SVG，标注为图源码，避免丢失。
+    return pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Text(
+          '图（Mermaid 源码）',
+          style: pw.TextStyle(font: font, fontSize: 10, color: PdfColors.blue700),
+        ),
+        codeWidget,
+      ],
     );
   }
 }

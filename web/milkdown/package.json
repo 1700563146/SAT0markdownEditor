@@ -32,6 +32,7 @@
     "@milkdown/plugin-automd": "7.19.1",
     "@milkdown/plugin-clipboard": "7.19.1",
     "@milkdown/plugin-cursor": "7.19.1",
+    "@milkdown/plugin-diagram": "7.7.0",
     "@milkdown/plugin-emoji": "7.19.1",
     "@milkdown/plugin-highlight": "7.19.1",
     "@milkdown/plugin-history": "7.19.1",
