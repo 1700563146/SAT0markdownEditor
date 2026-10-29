@@ -428,6 +428,7 @@ class MilkdownWebViewEditor extends StatefulWidget {
   final String initialMarkdown;
   final bool readOnly;
   final ValueChanged<String>? onContentChange;
+  final ValueChanged<MarkdownChangePayload>? onContentPatch;
   final MilkdownBridgeMessageHandler? onBridgeMessage;
   final ValueChanged<OnImageErrorPayload>? onImageError;
   final ValueChanged<OnImageClickPayload>? onImageClick;
@@ -458,6 +459,7 @@ class MilkdownWebViewEditor extends StatefulWidget {
     required this.initialMarkdown,
     this.readOnly = false,
     this.onContentChange,
+    this.onContentPatch,
     this.onBridgeMessage,
     this.onImageError,
     this.onImageClick,
@@ -1342,6 +1344,18 @@ class _MilkdownWebViewEditorState extends State<MilkdownWebViewEditor> {
       onContentChange: (markdown) {
         _lastSyncedMarkdown = markdown;
         widget.onContentChange?.call(markdown);
+      },
+      onContentPatch: (payload) {
+        // T-06：行级增量回写。本地同步基线同步应用 patch，保持与 Web 侧一致，
+        // 避免 didUpdateWidget 因基线滞后误判需要重发 init_doc。
+        final patch = payload.patch;
+        if (patch != null) {
+          final updated = applyMarkdownLinePatch(_lastSyncedMarkdown ?? '', patch);
+          if (updated != null) {
+            _lastSyncedMarkdown = updated;
+          }
+        }
+        widget.onContentPatch?.call(payload);
       },
       onOutlineUpdate: widget.onOutlineUpdate,
       onLinkClick: widget.onLinkClick,

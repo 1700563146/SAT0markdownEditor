@@ -78,6 +78,11 @@ class _EditorScreenState extends State<EditorScreen>
   String? _pendingMilkdownMarkdown;
   int _milkdownChangeSeq = 0;
 
+  /// T-06：Web 侧「最后一次成功回写」的完整 markdown 基线。行级增量 patch
+  /// 基于该基线逐次应用（与 Web 侧 lastSentMarkdown 严格同步）；full 回写时
+  /// 直接重置。基线缺失或 patch 越界时视为不同步，请求 Web 侧全量对齐。
+  String? _lastWebMarkdown;
+
   // ==================== 字数统计缓存 ====================
   int _cachedCharCount = 0;
   int _cachedGlyphCount = 0;
@@ -357,6 +362,9 @@ class _EditorScreenState extends State<EditorScreen>
     _textController.text = content;
     // Store original markdown for incremental merge
     _originalMarkdown = content;
+    // T-06：新文档加载后 Web 侧基线未建立，置空等待首个 full 回写重建，
+    // 防止残留上一文档的增量基线导致 patch 错位。
+    _lastWebMarkdown = null;
     _originalLineEnding = content.contains('\r\n') ? '\r\n' : '\n';
     _isMilkdownReady = false;
     if (!_textListenerAttached) {
@@ -1157,6 +1165,9 @@ class _EditorScreenState extends State<EditorScreen>
       _textController.removeListener(_onTextChanged);
       _textController.text = restoredContent;
       _originalMarkdown = restoredContent;
+      // T-06：恢复版本后 Web 侧会经 didUpdateWidget 重发 init_doc 并重置自身
+      // 基线，此处同步置空本地基线，等待后续 full 回写重建，避免旧基线错配。
+      _lastWebMarkdown = null;
       _textController.addListener(_onTextChanged);
 
       // 重置编辑历史
@@ -2048,9 +2059,35 @@ class _EditorScreenState extends State<EditorScreen>
 
   void _handleMilkdownContentChange(String markdown) {
     if (!_isMilkdownReady) return;
+    // T-06：full 回写即最新基线；patch 回写由 _handleMilkdownContentPatch 在
+    // 应用成功后推进同一基线。
+    _lastWebMarkdown = markdown;
     _pendingMilkdownMarkdown = markdown;
     final seq = ++_milkdownChangeSeq;
     _mergeDebouncer.run(() => _applyMilkdownContentChange(markdown, seq));
+  }
+
+  /// T-06：处理 Web 侧行级增量回写。patch 基于本地基线（_lastWebMarkdown）
+  /// 逐次应用，成功后与 full 路径共用同一防抖/增量合并逻辑，避免长文连续
+  /// 输入时每次防抖都全量序列化传输。
+  void _handleMilkdownContentPatch(MarkdownChangePayload payload) {
+    if (!_isMilkdownReady) return;
+    final patch = payload.patch;
+    if (patch == null) return;
+    final base = _lastWebMarkdown;
+    if (base == null) {
+      // 基线缺失（异常路径）：请求 Web 侧全量对齐，避免增量错位。
+      unawaited(_previewWebViewController.execCmd('force_flush_full'));
+      return;
+    }
+    final updated = applyMarkdownLinePatch(base, patch);
+    if (updated == null) {
+      // patch 越界或与基线不匹配：同样请求全量对齐。
+      unawaited(_previewWebViewController.execCmd('force_flush_full'));
+      return;
+    }
+    _lastWebMarkdown = updated;
+    _handleMilkdownContentChange(updated);
   }
 
   void _applyMilkdownContentChange(String markdown, int seq) {
@@ -2135,6 +2172,7 @@ class _EditorScreenState extends State<EditorScreen>
       baseDirectory: File(widget.filePath).parent.path,
       textColor: _documentTextColor(settings),
       onContentChange: _handleMilkdownContentChange,
+      onContentPatch: _handleMilkdownContentPatch,
       onOutlineUpdate: _handleOutlineUpdate,
       onLinkClick: (payload) =>
           _handleLinkTap(payload.text ?? '', payload.href, payload.title ?? ''),

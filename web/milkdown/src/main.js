@@ -198,15 +198,24 @@ const getEffectiveCodeBlockTheme = () => {
   return CODE_BLOCK_THEMES[themeId] || null;
 };
 // Adaptive debounce: larger files get longer debounce to reduce save frequency
-// Small (< 10KB): 80ms, Medium (10-50KB): 150ms, Large (> 50KB): 300ms
+// Small (< 10KB): 80ms, Medium (10-50KB): 150ms, Large (50-100KB): 300ms,
+// Huge (> 100KB, T-06): 500ms —— 长文连续输入时降低回写频率，只在失焦/保存时全量对齐。
 const calculateAdaptiveDebounceMs = (markdownLength) => {
   if (markdownLength < 10000) return 80;
   if (markdownLength < 50000) return 150;
-  return 300;
+  if (markdownLength < 100000) return 300;
+  return 500;
 };
 let contentChangeTimerId = null;
 let pendingContentMarkdown = null;
 let pendingContentMode = 'full';
+// T-06: Web 侧「上一次成功发给 Flutter 的完整 markdown」基线。行级 patch 基于
+// 该基线生成，Flutter 侧持有一份严格同步的副本，逐次应用即可对齐，无需全量传输。
+let lastSentMarkdown = null;
+// 大文档才启用 patch 模式；小于该阈值时全量回写本身成本可接受，保持原行为。
+const PATCH_MODE_MIN_CHARS = 50 * 1024;
+// 验收标准：100KB 文档连续输入时 Flutter 侧单次消息 < 4KB。
+const PATCH_MAX_JSON_BYTES = 4 * 1024;
 let uploadFailureCount = 0;
 let uploadFailureWindowStart = Date.now();
 let searchHighlightRanges = [];
@@ -1421,6 +1430,43 @@ const normalizeTrailingNewline = (markdown) => (
   typeof markdown === 'string' && markdown ? markdown.replace(/\n+$/, '\n') : markdown
 );
 
+// T-06: 行级 split/join。与 Dart 侧 applyMarkdownLinePatch 的 base.split('\n') /
+// lines.join('\n') 语义保持一致，保证往返精确。
+const splitMarkdownLines = (text) => (
+  typeof text === 'string' && text ? text.split('\n') : []
+);
+
+// 行级增量 diff：公共前缀 + 公共后缀 + 中间替换。连续输入通常只改动一个区域，
+// 中间替换行数远小于全文，满足「单次消息 < 4KB」的验收标准。
+// 变化范围超过阈值时返回 null，调用方降级为全量回写。
+const createLinePatch = (oldText, newText) => {
+  if (typeof oldText !== 'string' || typeof newText !== 'string') return null;
+  if (oldText === newText) return { start: 0, end: 0, lines: [] };
+  const oldLines = splitMarkdownLines(oldText);
+  const newLines = splitMarkdownLines(newText);
+  const oldLen = oldLines.length;
+  const newLen = newLines.length;
+  let prefix = 0;
+  while (prefix < oldLen && prefix < newLen && oldLines[prefix] === newLines[prefix]) {
+    prefix += 1;
+  }
+  let suffix = 0;
+  while (
+    suffix < oldLen - prefix &&
+    suffix < newLen - prefix &&
+    oldLines[oldLen - 1 - suffix] === newLines[newLen - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  const start = prefix;
+  const oldEnd = oldLen - suffix;
+  const newEnd = newLen - suffix;
+  // 中间替换过大（>128 行或超过原行数一半）时不再适合增量，降级全量。
+  const replacedLines = newEnd - start;
+  if (replacedLines > Math.max(128, Math.floor(oldLen / 2))) return null;
+  return { start, end: oldEnd, lines: newLines.slice(start, newEnd) };
+};
+
 const flushContentChange = () => {
   if (pendingContentMarkdown == null) return;
   const markdown = normalizeTrailingNewline(
@@ -1429,10 +1475,22 @@ const flushContentChange = () => {
   const mode = pendingContentMode || 'full';
   pendingContentMarkdown = null;
   pendingContentMode = 'full';
-  emit('on_content_change', {
-    mode,
-    markdown,
-  });
+
+  if (mode === 'patch') {
+    const patch = createLinePatch(lastSentMarkdown, markdown);
+    if (patch) {
+      const payload = { mode: 'patch', patch };
+      // 序列化后的 patch 仍超限（极端连续输入）时回退全量，保证数据不丢。
+      if (JSON.stringify(payload).length <= PATCH_MAX_JSON_BYTES) {
+        lastSentMarkdown = markdown;
+        emit('on_content_change', payload);
+        return;
+      }
+    }
+    // 降级路径：patch 不可用或超限 → 全量回写
+  }
+  lastSentMarkdown = markdown;
+  emit('on_content_change', { mode: 'full', markdown });
 };
 
 const scheduleContentChange = (markdown, { mode = 'full' } = {}) => {
@@ -2827,7 +2885,10 @@ const createEditor = async () => {
         }, perfSizes());
         if (!isApplyingFromFlutter && !initializingEditor) {
           documentEdited = true;
-          scheduleContentChange(sanitizedMarkdown);
+          // T-06: 大文档改用行级增量 patch 回写，避免每次防抖全量序列化全文
+          scheduleContentChange(sanitizedMarkdown, {
+            mode: sanitizedMarkdown.length > PATCH_MODE_MIN_CHARS ? 'patch' : 'full',
+          });
         }
         if (!progressiveRenderPending) {
           isApplyingFromFlutter = false;
@@ -3511,6 +3572,22 @@ const executeCommand = (cmd, args = {}) => {
       emitCmdResult(cmd, ok, ok ? null : 'not_applicable', startedAt);
       return;
     }
+    if (cmd === 'force_flush_full') {
+      // T-06 兜底：Flutter 侧基线不同步（行级 patch 无法应用）时请求全量对齐。
+      if (contentChangeTimerId != null) {
+        clearTimeout(contentChangeTimerId);
+        contentChangeTimerId = null;
+      }
+      const rawBody = editorInstance.action((ctx) => ctx.get(serializerCtx)(ctx.get(editorViewCtx).state.doc));
+      const body = normalizeTrailingNewline(deproxyImageUrlsInMarkdown(rawBody, currentBaseDirectory));
+      const markdown = currentFrontmatter ? `${currentFrontmatter}${body}` : body;
+      pendingContentMarkdown = null;
+      pendingContentMode = 'full';
+      lastSentMarkdown = markdown;
+      emit('on_content_change', { mode: 'full', markdown });
+      emitCmdResult(cmd, true, null, startedAt);
+      return;
+    }
     if (cmd === 'set_keyboard_metrics') {
       const keyboardInset = Number(args?.keyboardInset);
       const toolbarHeight = Number(args?.toolbarHeight);
@@ -4077,6 +4154,9 @@ const onFlutterMessage = (message) => {
     const markdown =
       typeof payload.markdown === 'string' ? payload.markdown : '';
     emitDebug(`[JS] init_doc: markdown length=${markdown.length}, editorInstance=${!!editorInstance}`);
+    // T-06: 记录本次下发的完整文档作为行级增量 patch 的基线；
+    // Flutter 侧持有一份严格同步的副本（初始值同为该 markdown）。
+    lastSentMarkdown = markdown;
     // 首篇文档到达时编辑器通常还没建：createEditor() 直接拿 currentMarkdown 做 defaultValue，
     // 不经过 setMarkdown，所以 frontmatter 必须在这里拆，否则会被当成内容解析并回写成 ***。
     const { frontmatter, body } = splitFrontmatter(markdown);

@@ -409,6 +409,80 @@ class OnHistoryStatePayload {
   Map<String, dynamic> toJson() => {'canUndo': canUndo, 'canRedo': canRedo};
 }
 
+/// T-06 行级增量 patch：Web 侧对 >50KB 文档按行做「公共前缀 + 公共后缀 +
+/// 中间替换」diff，替代整篇 markdown 的 postMessage 传输，降低长文连续输入时
+/// 的序列化与主线程压力。
+class MarkdownLinePatch {
+  /// 起始行（0-based，含）。
+  final int start;
+
+  /// 结束行（不含，针对 patch 应用前的旧文本行号）。
+  final int end;
+
+  /// 替换后的新行。
+  final List<String> lines;
+
+  const MarkdownLinePatch({
+    required this.start,
+    required this.end,
+    required this.lines,
+  });
+
+  factory MarkdownLinePatch.fromJson(Map<String, dynamic> json) {
+    final startRaw = json['start'];
+    final endRaw = json['end'];
+    final start = startRaw is int
+        ? startRaw
+        : int.tryParse(startRaw?.toString() ?? '');
+    final end = endRaw is int
+        ? endRaw
+        : int.tryParse(endRaw?.toString() ?? '');
+    if (start == null || end == null || start < 0 || end < start) {
+      throw const FormatException('MarkdownLinePatch.start/end is invalid');
+    }
+    final rawLines = json['lines'];
+    final lines = rawLines is List
+        ? rawLines.map((e) => e?.toString() ?? '').toList(growable: false)
+        : const <String>[];
+    return MarkdownLinePatch(start: start, end: end, lines: lines);
+  }
+
+  Map<String, dynamic> toJson() => {
+        'start': start,
+        'end': end,
+        'lines': lines,
+      };
+}
+
+/// Web → Flutter 内容变更载荷：full 模式携带完整 markdown（原行为），
+/// patch 模式携带行级增量（配合 Flutter 侧保存的基线逐次应用）。
+class MarkdownChangePayload {
+  /// 'full' | 'patch'
+  final String mode;
+
+  final String? markdown;
+
+  final MarkdownLinePatch? patch;
+
+  const MarkdownChangePayload({required this.mode, this.markdown, this.patch});
+
+  bool get isPatch => mode == 'patch' && patch != null;
+}
+
+/// 将行级 patch 应用到基线 markdown。行号越界或结构不合法时返回 null，
+/// 调用方应视为「基线不同步」，等待下一次全量或主动请求全量对齐。
+String? applyMarkdownLinePatch(String base, MarkdownLinePatch patch) {
+  if (patch.start < 0 || patch.end < patch.start) return null;
+  final lines = base.split('\n');
+  if (patch.end > lines.length) return null;
+  final updated = <String>[
+    ...lines.sublist(0, patch.start),
+    ...patch.lines,
+    ...lines.sublist(patch.end),
+  ];
+  return updated.join('\n');
+}
+
 String createBridgeRequestId() {
   final now = DateTime.now();
   final salt = Random.secure().nextInt(_bridgeRequestSaltLimit);
@@ -424,6 +498,7 @@ String createBridgeRequestId() {
 void dispatchMilkdownBridgeMessage(
   Map<String, dynamic> map, {
   void Function(String markdown)? onContentChange,
+  void Function(MarkdownChangePayload payload)? onContentPatch,
   void Function(OnOutlineUpdatePayload payload)? onOutlineUpdate,
   void Function(OnLinkClickPayload payload)? onLinkClick,
   void Function(OnImageErrorPayload payload)? onImageError,
@@ -462,6 +537,26 @@ void dispatchMilkdownBridgeMessage(
   final payloadMap = Map<String, dynamic>.from(payload);
 
   if (type == 'on_content_change') {
+    final mode = payloadMap['mode']?.toString() ?? 'full';
+    if (mode == 'patch') {
+      // T-06：行级增量模式。Flutter 侧基于本地保存的基线逐次应用 patch。
+      final rawPatch = payloadMap['patch'];
+      if (rawPatch is Map) {
+        try {
+          onContentPatch?.call(
+            MarkdownChangePayload(
+              mode: 'patch',
+              patch: MarkdownLinePatch.fromJson(
+                Map<String, dynamic>.from(rawPatch),
+              ),
+            ),
+          );
+        } on FormatException {
+          // Ignore malformed patch; next full sync will realign.
+        }
+      }
+      return;
+    }
     final markdown = payloadMap['markdown'];
     if (markdown is String) {
       onContentChange?.call(markdown);
