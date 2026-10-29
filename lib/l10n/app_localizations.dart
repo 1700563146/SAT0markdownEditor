@@ -1376,6 +1376,60 @@ abstract class AppLocalizations {
   /// **'跳过'**
   String get skip;
 
+  /// 三方合并选项
+  ///
+  /// In zh, this message translates to:
+  /// **'合并'**
+  String get merge;
+
+  /// 三方合并对话框标题
+  ///
+  /// In zh, this message translates to:
+  /// **'合并冲突'**
+  String get mergeConflictTitle;
+
+  /// 三方合并对话框提示
+  ///
+  /// In zh, this message translates to:
+  /// **'以下为本地与云端同时修改的内容，请逐块选择保留方式（不重叠的修改将自动合并）。'**
+  String get mergeConflictHint;
+
+  /// 确认合并按钮
+  ///
+  /// In zh, this message translates to:
+  /// **'确认合并'**
+  String get confirmMerge;
+
+  /// 冲突块编号标签
+  ///
+  /// In zh, this message translates to:
+  /// **'冲突块 {count}'**
+  String mergeBlockLabel(int count);
+
+  /// 本地侧内容标签
+  ///
+  /// In zh, this message translates to:
+  /// **'本地内容'**
+  String get mergeLocalContent;
+
+  /// 云端侧内容标签
+  ///
+  /// In zh, this message translates to:
+  /// **'云端内容'**
+  String get mergeRemoteContent;
+
+  /// 冲突块两者都保留选项
+  ///
+  /// In zh, this message translates to:
+  /// **'两者保留'**
+  String get mergeKeepBoth;
+
+  /// 合并选择进度提示
+  ///
+  /// In zh, this message translates to:
+  /// **'已选择 {decided}/{total} 个冲突块'**
+  String mergeSelectedBlocks(int total, int decided);
+
   /// 本地版本标签
   ///
   /// In zh, this message translates to:

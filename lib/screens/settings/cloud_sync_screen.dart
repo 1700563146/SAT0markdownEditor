@@ -19,6 +19,7 @@ import '../../services/ftp_service.dart';
 import '../../services/sync_service_interface.dart';
 import '../../services/my_files_service.dart';
 import '../../services/cloud_sync_service.dart';
+import '../../utils/three_way_merge.dart';
 import '../../widgets/app_background.dart';
 import '../../utils/app_style.dart';
 import '../../widgets/app_surface.dart';
@@ -1306,6 +1307,14 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
                   ),
                   const SizedBox(width: 8),
                   Expanded(
+                    child: _buildMergeButton(
+                      conflict,
+                      l10n,
+                      setConflictState,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
                     child: _buildResolutionButton(
                       conflict,
                       ConflictResolution.skip,
@@ -1316,10 +1325,346 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
                   ),
                 ],
               ),
+              if (conflict.resolution == ConflictResolution.merge)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    l10n.mergeSelectedBlocks(
+                      conflict.mergeBlocks.length,
+                      conflict.mergeDecisions.length,
+                    ),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ),
             ],
           ),
         );
       },
+    );
+  }
+
+  /// T-14: 三方合并按钮（冲突块交互式选择）
+  Widget _buildMergeButton(
+    SyncConflict conflict,
+    AppLocalizations l10n,
+    StateSetter setConflictState,
+  ) {
+    final isSelected = conflict.resolution == ConflictResolution.merge;
+    return GestureDetector(
+      onTap: () async {
+        if (!conflict.canMerge) return;
+        final decided = await _showMergeDialog(context, conflict);
+        if (decided == true) {
+          setConflictState(() {
+            conflict.resolution = ConflictResolution.merge;
+          });
+        }
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.2)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: isSelected
+                ? Theme.of(context).colorScheme.primary
+                : conflict.canMerge
+                ? Theme.of(context).dividerColor
+                : Theme.of(context).dividerColor.withValues(alpha: 0.3),
+          ),
+        ),
+        child: Column(
+          children: [
+            Icon(
+              Icons.merge,
+              size: 16,
+              color: isSelected
+                  ? Theme.of(context).colorScheme.primary
+                  : conflict.canMerge
+                  ? null
+                  : Theme.of(
+                      context,
+                    ).colorScheme.onSurface.withValues(alpha: 0.3),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              l10n.merge,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                color: isSelected
+                    ? Theme.of(context).colorScheme.primary
+                    : conflict.canMerge
+                    ? null
+                    : Theme.of(
+                        context,
+                      ).colorScheme.onSurface.withValues(alpha: 0.3),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// T-14: 逐冲突块交互式选择合并内容
+  Future<bool?> _showMergeDialog(
+    BuildContext context,
+    SyncConflict conflict,
+  ) {
+    final l10n = AppLocalizations.of(context)!;
+    final blocks = conflict.mergeBlocks;
+    // 决策列表与冲突块数量对齐（不足则补齐为 keepLocal 保守值）
+    if (conflict.mergeDecisions.length != blocks.length) {
+      conflict.mergeDecisions = List<MergeBlockChoice>.filled(
+        blocks.length,
+        MergeBlockChoice.keepLocal,
+      );
+    }
+
+    return showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            return AlertDialog(
+              title: Text(l10n.mergeConflictTitle),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      conflict.relativePath,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      l10n.mergeConflictHint,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Theme.of(
+                          dialogContext,
+                        ).colorScheme.onSurface.withValues(alpha: 0.6),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Flexible(
+                      child: SingleChildScrollView(
+                        child: Column(
+                          children: [
+                            for (var i = 0; i < blocks.length; i++)
+                              _buildMergeBlockCard(
+                                dialogContext,
+                                i,
+                                blocks[i],
+                                conflict,
+                                setDialogState,
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: Text(l10n.cancel),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: Text(l10n.confirmMerge),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildMergeBlockCard(
+    BuildContext context,
+    int index,
+    MergeConflictBlock block,
+    SyncConflict conflict,
+    StateSetter setDialogState,
+  ) {
+    final l10n = AppLocalizations.of(context)!;
+    final choice = index < conflict.mergeDecisions.length
+        ? conflict.mergeDecisions[index]
+        : MergeBlockChoice.keepLocal;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(
+          alpha: 0.5,
+        ),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Theme.of(context).dividerColor),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            l10n.mergeBlockLabel(index + 1),
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 12,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            l10n.mergeLocalContent,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 2),
+          _buildMergeContentBox(context, block.localLines),
+          const SizedBox(height: 6),
+          Text(
+            l10n.mergeRemoteContent,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 2),
+          _buildMergeContentBox(context, block.remoteLines),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: _buildMergeChoiceChip(
+                  context,
+                  MergeBlockChoice.keepLocal,
+                  l10n.keepLocal,
+                  choice,
+                  () {
+                    setDialogState(() {
+                      conflict.mergeDecisions[index] =
+                          MergeBlockChoice.keepLocal;
+                    });
+                  },
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _buildMergeChoiceChip(
+                  context,
+                  MergeBlockChoice.keepRemote,
+                  l10n.keepRemote,
+                  choice,
+                  () {
+                    setDialogState(() {
+                      conflict.mergeDecisions[index] =
+                          MergeBlockChoice.keepRemote;
+                    });
+                  },
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _buildMergeChoiceChip(
+                  context,
+                  MergeBlockChoice.keepBoth,
+                  l10n.mergeKeepBoth,
+                  choice,
+                  () {
+                    setDialogState(() {
+                      conflict.mergeDecisions[index] =
+                          MergeBlockChoice.keepBoth;
+                    });
+                  },
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMergeContentBox(BuildContext context, List<String> lines) {
+    final preview = lines.length > 12
+        ? [...lines.take(12), '...（${lines.length - 12} 行）']
+        : lines;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(6),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        preview.join('\n'),
+        style: TextStyle(
+          fontSize: 11,
+          fontFamily: 'monospace',
+          color: Theme.of(context).colorScheme.onSurface,
+        ),
+        maxLines: 14,
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
+
+  Widget _buildMergeChoiceChip(
+    BuildContext context,
+    MergeBlockChoice candidate,
+    String label,
+    MergeBlockChoice current,
+    VoidCallback onTap,
+  ) {
+    final isSelected = candidate == current;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 4),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.15)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: isSelected
+                ? Theme.of(context).colorScheme.primary
+                : Theme.of(context).dividerColor,
+          ),
+        ),
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+            color: isSelected
+                ? Theme.of(context).colorScheme.primary
+                : Theme.of(context).colorScheme.onSurface,
+          ),
+        ),
+      ),
     );
   }
 

@@ -674,6 +674,33 @@ class AppLocalizationsZh extends AppLocalizations {
   String get skip => '跳过';
 
   @override
+  String get merge => '合并';
+
+  @override
+  String get mergeConflictTitle => '合并冲突';
+
+  @override
+  String get mergeConflictHint => '以下为本地与云端同时修改的内容，请逐块选择保留方式（不重叠的修改将自动合并）。';
+
+  @override
+  String get confirmMerge => '确认合并';
+
+  @override
+  String mergeBlockLabel(int count) => '冲突块 $count';
+
+  @override
+  String get mergeLocalContent => '本地内容';
+
+  @override
+  String get mergeRemoteContent => '云端内容';
+
+  @override
+  String get mergeKeepBoth => '两者保留';
+
+  @override
+  String mergeSelectedBlocks(int total, int decided) => '已选择 $decided/$total 个冲突块';
+
+  @override
   String get localVersion => '本地';
 
   @override

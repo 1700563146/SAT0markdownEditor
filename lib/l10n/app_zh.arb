@@ -832,6 +832,55 @@
   "@skip": {
     "description": "跳过选项"
   },
+  "merge": "合并",
+  "@merge": {
+    "description": "三方合并选项"
+  },
+  "mergeConflictTitle": "合并冲突",
+  "@mergeConflictTitle": {
+    "description": "三方合并对话框标题"
+  },
+  "mergeConflictHint": "以下为本地与云端同时修改的内容，请逐块选择保留方式（不重叠的修改将自动合并）。",
+  "@mergeConflictHint": {
+    "description": "三方合并对话框提示"
+  },
+  "confirmMerge": "确认合并",
+  "@confirmMerge": {
+    "description": "确认合并按钮"
+  },
+  "mergeBlockLabel": "冲突块 {count}",
+  "@mergeBlockLabel": {
+    "description": "冲突块编号标签",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "mergeLocalContent": "本地内容",
+  "@mergeLocalContent": {
+    "description": "本地侧内容标签"
+  },
+  "mergeRemoteContent": "云端内容",
+  "@mergeRemoteContent": {
+    "description": "云端侧内容标签"
+  },
+  "mergeKeepBoth": "两者保留",
+  "@mergeKeepBoth": {
+    "description": "冲突块两者都保留选项"
+  },
+  "mergeSelectedBlocks": "已选择 {decided}/{total} 个冲突块",
+  "@mergeSelectedBlocks": {
+    "description": "合并选择进度提示",
+    "placeholders": {
+      "total": {
+        "type": "int"
+      },
+      "decided": {
+        "type": "int"
+      }
+    }
+  },
   "localVersion": "本地",
   "@localVersion": {
     "description": "本地版本标签"

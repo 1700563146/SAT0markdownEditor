@@ -692,6 +692,35 @@ class AppLocalizationsEn extends AppLocalizations {
   String get skip => 'Skip';
 
   @override
+  String get merge => 'Merge';
+
+  @override
+  String get mergeConflictTitle => 'Merge Conflict';
+
+  @override
+  String get mergeConflictHint =>
+      'Both local and cloud modified these sections. Choose what to keep per block (non-overlapping changes are merged automatically).';
+
+  @override
+  String get confirmMerge => 'Confirm Merge';
+
+  @override
+  String mergeBlockLabel(int count) => 'Conflict block $count';
+
+  @override
+  String get mergeLocalContent => 'Local content';
+
+  @override
+  String get mergeRemoteContent => 'Cloud content';
+
+  @override
+  String get mergeKeepBoth => 'Keep both';
+
+  @override
+  String mergeSelectedBlocks(int total, int decided) =>
+      'Selected $decided/$total conflict blocks';
+
+  @override
   String get localVersion => 'Local';
 
   @override

@@ -643,6 +643,55 @@
   "@skip": {
     "description": "Skip option"
   },
+  "merge": "Merge",
+  "@merge": {
+    "description": "Three-way merge option"
+  },
+  "mergeConflictTitle": "Merge Conflict",
+  "@mergeConflictTitle": {
+    "description": "Three-way merge dialog title"
+  },
+  "mergeConflictHint": "Both local and cloud modified these sections. Choose what to keep per block (non-overlapping changes are merged automatically).",
+  "@mergeConflictHint": {
+    "description": "Three-way merge dialog hint"
+  },
+  "confirmMerge": "Confirm Merge",
+  "@confirmMerge": {
+    "description": "Confirm merge button"
+  },
+  "mergeBlockLabel": "Conflict block {count}",
+  "@mergeBlockLabel": {
+    "description": "Conflict block number label",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "mergeLocalContent": "Local content",
+  "@mergeLocalContent": {
+    "description": "Local side content label"
+  },
+  "mergeRemoteContent": "Cloud content",
+  "@mergeRemoteContent": {
+    "description": "Remote side content label"
+  },
+  "mergeKeepBoth": "Keep both",
+  "@mergeKeepBoth": {
+    "description": "Keep both sides option"
+  },
+  "mergeSelectedBlocks": "Selected {decided}/{total} conflict blocks",
+  "@mergeSelectedBlocks": {
+    "description": "Merge selection progress hint",
+    "placeholders": {
+      "total": {
+        "type": "int"
+      },
+      "decided": {
+        "type": "int"
+      }
+    }
+  },
   "localVersion": "Local",
   "@localVersion": {
     "description": "Local version label"

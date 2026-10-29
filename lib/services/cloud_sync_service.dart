@@ -4,18 +4,23 @@
 // 协调本地工作区与 WebDAV 远程服务器的同步：
 // - 全量同步
 // - 单文件同步
-// - 冲突解决（最新保存优先）
+// - 冲突解决（T-14: 基于 T-02 台账 base 哈希的三方合并，
+//   冲突块交互式选择；无法合并时跳过，不再二选一覆盖）
 // ============================================================================
 
+import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
 import 'sync_service_interface.dart';
 import 'sync_ledger.dart';
+import 'sync_base_store.dart';
 import 'my_files_service.dart';
 import 'version_service.dart';
 import '../utils/debug_log.dart';
+import '../utils/three_way_merge.dart';
 
 /// 同步状态枚举
 enum SyncStatus {
@@ -62,6 +67,7 @@ enum ConflictResolution {
   keepLocal, // 保留本地版本
   keepRemote, // 保留远程版本
   skip, // 跳过此文件
+  merge, // T-14: 三方合并（逐冲突块交互式选择）
 }
 
 /// 同步冲突信息
@@ -72,12 +78,28 @@ class SyncConflict {
   final DateTime remoteModified;
   ConflictResolution resolution;
 
+  /// T-14: 是否可进行三方合并（文本、大小受限、base 存在、远程内容可获取）
+  bool canMerge;
+
+  /// T-14: 冲突块数量（仅 [canMerge] 时有效）
+  int conflictBlockCount;
+
+  /// T-14: 冲突块内容（供 UI 逐块展示与决策）
+  List<MergeConflictBlock> mergeBlocks;
+
+  /// T-14: 用户对冲突块的选择（顺序与 [mergeBlocks] 一致）
+  List<MergeBlockChoice> mergeDecisions;
+
   SyncConflict({
     required this.relativePath,
     required this.localPath,
     required this.localModified,
     required this.remoteModified,
     this.resolution = ConflictResolution.skip,
+    this.canMerge = false,
+    this.conflictBlockCount = 0,
+    this.mergeBlocks = const [],
+    this.mergeDecisions = const [],
   });
 
   /// 本地是否更新
@@ -194,6 +216,7 @@ class CloudSyncService {
       // 传输任务队列
       final pendingUploads = <_PendingUpload>[];
       final pendingDownloads = <_PendingDownload>[];
+      final pendingMerges = <_PendingMerge>[];
       final queuedDownloadPaths = <String>{};
       void queueDownload(String relativePath, String localPath) {
         if (queuedDownloadPaths.add(relativePath)) {
@@ -203,9 +226,13 @@ class CloudSyncService {
 
       // 构建已解决冲突的路径映射
       final resolvedMap = <String, ConflictResolution>{};
+      final mergeDecisionsMap = <String, List<MergeBlockChoice>>{};
       if (resolvedConflicts != null) {
         for (final conflict in resolvedConflicts) {
           resolvedMap[conflict.relativePath] = conflict.resolution;
+          if (conflict.resolution == ConflictResolution.merge) {
+            mergeDecisionsMap[conflict.relativePath] = conflict.mergeDecisions;
+          }
         }
       }
 
@@ -253,6 +280,16 @@ class CloudSyncService {
             case ConflictResolution.skip:
               skipped++;
               break;
+            case ConflictResolution.merge:
+              // T-14: 三方合并（用户已交互选择冲突块）
+              pendingMerges.add(
+                _PendingMerge(
+                  localFile.path,
+                  relativePath,
+                  mergeDecisionsMap[relativePath] ?? const [],
+                ),
+              );
+              break;
           }
           continue;
         }
@@ -280,21 +317,15 @@ class CloudSyncService {
           } else if (!localChanged && remoteChanged) {
             queueDownload(relativePath, localFile.path);
           } else {
-            // 双方都变更：沿用"最新保存优先"
-            if (localMtime.isAfter(remoteMtime)) {
-              pendingUploads.add(
-                _PendingUpload(
-                  localFile.path,
-                  relativePath,
-                  localHash,
-                  localMtime,
-                ),
-              );
-            } else if (remoteMtime.isAfter(localMtime)) {
-              queueDownload(relativePath, localFile.path);
-            } else {
-              skipped++;
-            }
+            // 双方都变更（T-14）：进入三方合并队列；无法合并时跳过，
+            // 不再按"最新保存优先"二选一覆盖
+            pendingMerges.add(
+              _PendingMerge(
+                localFile.path,
+                relativePath,
+                mergeDecisionsMap[relativePath] ?? const [],
+              ),
+            );
           }
           continue;
         }
@@ -335,6 +366,29 @@ class CloudSyncService {
 
         if (!await File(localPath).exists()) {
           queueDownload(relativePath, localPath);
+        }
+      }
+
+      // 阶段一.5：处理三方合并（T-14）
+      // 合并需要读取远程内容，串行执行（冲突文件通常很少）
+      if (pendingMerges.isNotEmpty) {
+        for (final task in pendingMerges) {
+          final merged = await _tryMergeFile(task);
+          if (merged == null) {
+            // 无法合并（二进制/超大/base 缺失/远程不可读/未完整决策）：
+            // 跳过，不二选一覆盖
+            skipped++;
+            continue;
+          }
+          // 合并成功：写回本地并排队上传合并结果
+          pendingUploads.add(
+            _PendingUpload(
+              task.localPath,
+              task.relativePath,
+              merged.contentHash,
+              merged.localMtime,
+            ),
+          );
         }
       }
 
@@ -390,6 +444,8 @@ class CloudSyncService {
             lastSyncedRemoteMtime: remoteMtime?.millisecondsSinceEpoch,
           ),
         );
+        // T-14: 同步完成后保存 base 内容（供下次三方合并使用）
+        await _saveBaseFromFile(task.relativePath, task.localPath);
       }
 
       // 阶段三：并发下载
@@ -427,6 +483,8 @@ class CloudSyncService {
                   remoteFile?.modifiedTime?.millisecondsSinceEpoch,
             ),
           );
+          // T-14: 下载完成即视为新的 base
+          await _saveBaseFromFile(task.relativePath, task.localPath);
         },
       );
 
@@ -512,15 +570,15 @@ class CloudSyncService {
         final remoteChanged = ledger.isRemoteChanged(relativePath, remoteMtime);
 
         if (localChanged && remoteChanged) {
-          // 双方都变更：交给用户决策
-          conflicts.add(
-            SyncConflict(
-              relativePath: relativePath,
-              localPath: localFile.path,
-              localModified: localMtime,
-              remoteModified: remoteMtime,
-            ),
+          // 双方都变更：交给用户决策（T-14: 可尝试三方合并）
+          final conflict = SyncConflict(
+            relativePath: relativePath,
+            localPath: localFile.path,
+            localModified: localMtime,
+            remoteModified: remoteMtime,
           );
+          await _analyzeMergeForConflict(conflict);
+          conflicts.add(conflict);
         } else if (localChanged) {
           toUpload.add(relativePath);
         } else if (remoteChanged) {
@@ -616,6 +674,8 @@ class CloudSyncService {
           ),
         );
         await ledger.save();
+        // T-14: 单文件上传成功后保存 base
+        await _saveBaseFromFile(relativePath, localPath);
       } catch (e) {
         // 台账更新失败只影响下次同步的判断精度，不影响本次上传结果
         appDebugLog('CloudSync: 单文件同步台账更新失败: $e');
@@ -772,6 +832,129 @@ class CloudSyncService {
     }
   }
 
+  /// T-14: 分析冲突文件是否可进行三方合并，并填充冲突块展示信息
+  Future<void> _analyzeMergeForConflict(SyncConflict conflict) async {
+    try {
+      final localFile = File(conflict.localPath);
+      if (!await localFile.exists()) return;
+      final localBytes = await localFile.readAsBytes();
+      if (localBytes.length > SyncBaseStore.maxMergeFileBytes) return;
+      final localText = utf8.decode(localBytes, allowMalformed: false);
+      final baseText = await SyncBaseStore.loadBase(conflict.relativePath);
+      if (baseText == null) return;
+
+      final tempFile = await _newMergeTempFile('ushio_preview_', conflict.relativePath);
+      try {
+        final ok = await _retry(
+          () => _syncService.downloadFile(
+            conflict.relativePath,
+            tempFile.path,
+          ),
+          '合并预览下载 ${conflict.relativePath}',
+        );
+        if (!ok) return;
+        final remoteBytes = await tempFile.readAsBytes();
+        if (remoteBytes.length > SyncBaseStore.maxMergeFileBytes) return;
+        final remoteText = utf8.decode(remoteBytes, allowMalformed: false);
+
+        final analysis = performThreeWayMerge(baseText, localText, remoteText);
+        if (analysis == null) return;
+
+        conflict.canMerge = true;
+        conflict.conflictBlockCount = analysis.conflicts.length;
+        conflict.mergeBlocks = List.unmodifiable(analysis.conflicts);
+        conflict.mergeDecisions = List<MergeBlockChoice>.filled(
+          analysis.conflicts.length,
+          MergeBlockChoice.keepLocal,
+        );
+      } finally {
+        await _deleteQuietly(tempFile);
+      }
+    } catch (e) {
+      appDebugLog('CloudSync: 合并预览分析失败 ${conflict.relativePath}: $e');
+    }
+  }
+
+  /// T-14: 执行三方合并并写回本地；无法合并时返回 null
+  Future<_MergedFile?> _tryMergeFile(_PendingMerge task) async {
+    final localFile = File(task.localPath);
+    if (!await localFile.exists()) return null;
+    final localBytes = await localFile.readAsBytes();
+    if (localBytes.length > SyncBaseStore.maxMergeFileBytes) return null;
+    String localText;
+    try {
+      localText = utf8.decode(localBytes, allowMalformed: false);
+    } catch (_) {
+      return null; // 非 UTF-8 文本不做合并
+    }
+    final baseText = await SyncBaseStore.loadBase(task.relativePath);
+    if (baseText == null) return null;
+
+    final tempFile = await _newMergeTempFile('ushio_merge_', task.relativePath);
+    try {
+      final ok = await _retry(
+        () => _syncService.downloadFile(task.relativePath, tempFile.path),
+        '合并下载 ${task.relativePath}',
+      );
+      if (!ok) return null;
+      final remoteBytes = await tempFile.readAsBytes();
+      if (remoteBytes.length > SyncBaseStore.maxMergeFileBytes) return null;
+      final remoteText = utf8.decode(remoteBytes, allowMalformed: false);
+
+      final analysis = performThreeWayMerge(baseText, localText, remoteText);
+      if (analysis == null) return null;
+
+      String mergedText;
+      if (analysis.hasConflicts) {
+        if (task.mergeDecisions.length != analysis.conflicts.length) {
+          // 冲突块决策未完整：跳过，避免二选一覆盖
+          return null;
+        }
+        mergedText = renderMergedText(analysis, task.mergeDecisions);
+      } else {
+        // 无冲突：自动合并
+        mergedText = analysis.autoMergedText;
+      }
+
+      await localFile.writeAsString(mergedText, flush: true);
+      final hash = await _hashFile(localFile);
+      if (hash == null) return null;
+      return _MergedFile(hash, await localFile.lastModified());
+    } finally {
+      await _deleteQuietly(tempFile);
+    }
+  }
+
+  /// T-14: 从文件读取文本并保存为同步 base（非文本/超限自动跳过）
+  Future<void> _saveBaseFromFile(String relativePath, String filePath) async {
+    try {
+      final file = File(filePath);
+      if (!await file.exists()) return;
+      final bytes = await file.readAsBytes();
+      if (bytes.length > SyncBaseStore.maxMergeFileBytes) return;
+      final text = utf8.decode(bytes, allowMalformed: false);
+      await SyncBaseStore.saveBase(relativePath, text);
+    } catch (e) {
+      appDebugLog('CloudSync: 保存 base 失败 $relativePath: $e');
+    }
+  }
+
+  /// 生成合并用临时文件（位于系统临时目录，避免污染工作区）
+  Future<File> _newMergeTempFile(String prefix, String relativePath) async {
+    final tempDir = await getTemporaryDirectory();
+    final key = sha256.convert(utf8.encode(relativePath)).toString();
+    return File(
+      '${tempDir.path}${Platform.pathSeparator}$prefix$key.tmp',
+    );
+  }
+
+  /// 静默删除临时文件
+  Future<void> _deleteQuietly(File file) async {
+    try {
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
+  }
+
   /// 带指数退避的重试（最多尝试 [maxAttempts] 次）
   Future<bool> _retry(
     Future<bool> Function() action,
@@ -844,4 +1027,25 @@ class _PendingDownload {
   final String localPath;
 
   const _PendingDownload(this.relativePath, this.localPath);
+}
+
+/// 待三方合并任务（T-14）
+class _PendingMerge {
+  final String localPath;
+  final String relativePath;
+  final List<MergeBlockChoice> mergeDecisions;
+
+  const _PendingMerge(
+    this.localPath,
+    this.relativePath,
+    this.mergeDecisions,
+  );
+}
+
+/// 合并结果（写回本地后的哈希与 mtime）
+class _MergedFile {
+  final String contentHash;
+  final DateTime localMtime;
+
+  const _MergedFile(this.contentHash, this.localMtime);
 }
