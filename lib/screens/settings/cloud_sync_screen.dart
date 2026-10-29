@@ -1070,17 +1070,22 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         final deleted = result.deletedCount > 0
             ? '，跳过 ${result.deletedCount}'
             : '';
+        final failed = result.failedCount > 0
+            ? '，失败 ${result.failedCount}（下次同步自动续传）'
+            : '';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Row(
               children: [
                 const Icon(Icons.check_circle, color: Colors.green),
                 const SizedBox(width: 12),
-                Text(
-                  l10n.syncComplete(
-                    result.uploadedCount,
-                    result.downloadedCount,
-                    deleted,
+                Expanded(
+                  child: Text(
+                    l10n.syncComplete(
+                      result.uploadedCount,
+                      result.downloadedCount,
+                      '$deleted$failed',
+                    ),
                   ),
                 ),
               ],

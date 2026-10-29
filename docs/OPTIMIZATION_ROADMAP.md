@@ -29,7 +29,7 @@
   3. 在 file_service 扫描与 cloud_sync 收集处统一排除 `.versions/`（常量集中定义）；长期方案：快照迁移到应用私有目录 `getApplicationDocumentsDirectory()/versions/<docHash>/`。
 - 验收：连续保存相同内容 10 次仅 1 份快照；文件列表/搜索/同步清单中不再出现 `.versions` 内文件；设置页可配置保留数量（见 T-13）。
 
-### T-02 云同步仅比较 mtime、串行传输、无重试 `未开始`
+### T-02 云同步仅比较 mtime、串行传输、无重试 `已完成（2026-10，待构建验证）`
 
 - 问题：冲突判断只看修改时间，时间戳不可靠时误判；上传/下载在 for 循环中串行执行，弱网整批失败且无重试。
 - 证据：`lib/services/cloud_sync_service.dart#L209`、`#L346`（mtime 比较）；`#L189`、`#L265`、`#L337`（串行循环）。
@@ -149,3 +149,4 @@
 | --- | --- | --- | --- |
 | 图标重构 | 已完成 | （仓库初始化提交） | aapt2 compile 通过；待真机/模拟器目视确认 |
 | T-01 | 已完成 | 见 `git log`（feat: 版本快照去重与保留策略） | 人工自审通过：去重/回填/保留策略/锁修正/`.versions` 排除（本地扫描+云同步收发双侧）均已实现；**待**有 Flutter SDK 环境执行 `flutter pub get`（新增 crypto 依赖）→ `flutter analyze` → `flutter test` → `flutter build apk --debug`，并按验收标准实测 |
+| T-02 | 已完成 | 见 `git log`（feat: 云同步台账三方比较与并发传输） | 新增 `lib/services/sync_ledger.dart`（SHA-256 内容哈希 + 远程 mtime 容差 2s 的三方比较，绑定工作区，工作区变更自动重置）；syncAll 重构为「比较→并发上传(4)→刷新远程列表→并发下载→台账落盘」；单文件失败指数退避重试 3 次，失败不写台账=天然续传；previewSync 未变更文件不再因 mtime 漂移误报冲突；UI 增加失败计数提示。**待** SDK 环境构建验证 + 真机 WebDAV 实测（首次同步逐文件初始化台账，无批量重传） |
