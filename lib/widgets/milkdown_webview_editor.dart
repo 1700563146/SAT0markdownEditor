@@ -36,56 +36,39 @@ bool isExpectedEditorCmdNoop(String cmd, String? reason) {
   return cmd == 'set_keyboard_metrics' && reason == 'editor_not_ready';
 }
 
+/// JS→Flutter bridge 消息类型白名单（与 web/milkdown/src/main.js 的 emit 保持同步）
+///
+/// 未在名单中的消息类型一律拒绝执行并记录，防止被注入的页面内容伪造 bridge 消息。
+const Set<String> _knownBridgeMessageTypes = <String>{
+  // 生命周期
+  'on_bridge_ready',
+  'on_ready',
+  'on_editor_focus',
+  // 渲染与内容
+  'on_render_complete',
+  'on_render_progress',
+  'on_content_change',
+  'on_outline_update',
+  'on_history_state',
+  'on_checkbox_toggle',
+  // 交互
+  'on_link_click',
+  'on_image_error',
+  'on_image_click',
+  // 资源请求
+  'on_upload_images_request',
+  'on_insert_image_request',
+  // 命令与诊断
+  'on_cmd_metric',
+  'on_cmd_failure_aggregate',
+  'on_cmd_result',
+  'on_debug_log',
+  'on_debug_report',
+};
+
 /// 内容安全工具类
 class _ContentSanitizer {
-  /// 危险的 HTML 标签
-  static final RegExp _dangerousTags = RegExp(
-    r'<\s*(script|iframe|object|embed|form|input|button|meta|link|style|base)[^>]*>',
-    caseSensitive: false,
-  );
-
-  /// 危险的事件处理器
-  static final RegExp _dangerousAttributes = RegExp(
-    r'''\s(on\w+)\s*=\s*['"][^'"]*['"]''',
-    caseSensitive: false,
-  );
-
-  /// javascript: 协议
-  static final RegExp _javascriptProtocol = RegExp(
-    r'''(href|src|action)\s*=\s*['"]?\s*javascript:''',
-    caseSensitive: false,
-  );
-
-  /// data: 协议中的潜在危险内容
-  static final RegExp _dangerousDataUri = RegExp(
-    r'data\s*:\s*(?!image/(png|jpe?g|gif|webp|svg\+xml|bmp|ico))[a-z0-9+.-]+',
-    caseSensitive: false,
-  );
-
-  /// 清理 Markdown 内容中的潜在 XSS 向量
-  ///
-  /// 注意：Milkdown 本身已有隔离机制，这是额外的防护层
-  static String sanitizeMarkdown(String markdown) {
-    var sanitized = markdown;
-
-    // 移除危险标签
-    sanitized = sanitized.replaceAll(_dangerousTags, '');
-
-    // 移除事件处理器
-    sanitized = sanitized.replaceAllMapped(_dangerousAttributes, (match) => '');
-
-    // 移除 javascript: 协议
-    sanitized = sanitized.replaceAllMapped(
-      _javascriptProtocol,
-      (match) => match
-          .group(0)!
-          .replaceFirst(RegExp(r'javascript:', caseSensitive: false), '#'),
-    );
-
-    return sanitized;
-  }
-
-  /// 清理 URL，阻止危险协议
+  /// 清理 URL，阻止危险协议（图片/链接等资源地址白名单）
   static String sanitizeUrl(String url) {
     final trimmed = url.trim();
 
@@ -1337,6 +1320,15 @@ class _MilkdownWebViewEditorState extends State<MilkdownWebViewEditor> {
     }
     final map = Map<String, dynamic>.from(args.first as Map);
     final msgType = map['type'] as String?;
+
+    // 命令白名单：未知类型拒绝执行，不向下转发
+    if (msgType == null || !_knownBridgeMessageTypes.contains(msgType)) {
+      appDebugLog(
+        '[WEBVIEW] Bridge: unknown message type rejected: $msgType',
+      );
+      return;
+    }
+
     if (msgType == 'on_bridge_ready' && !_bridgeReady.isCompleted) {
       _bridgeReady.complete();
     }

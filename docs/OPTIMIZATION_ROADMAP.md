@@ -50,7 +50,7 @@
   3. `buildProxyUrl` 仅接受 `https://` 前缀。
 - 验收：篡改 APK 后安装被拒绝并提示；配置 http 代理前缀时被忽略；单元测试覆盖 buildProxyUrl 白名单。
 
-### T-04 WebView 内容清理为死代码且正则可绕过 `未开始`
+### T-04 WebView 内容清理为死代码且正则可绕过 `已完成（2026-10，待构建验证）`
 
 - 问题：`sanitizeMarkdown` 全库无调用点；其正则规则可被 `<scr<script>ipt>`、无引号 `onerror=` 绕过。
 - 证据：`lib/widgets/milkdown_webview_editor.dart#L42-L60`（正则规则）、`#L68`（sanitizeMarkdown 定义，无调用）。
@@ -151,3 +151,4 @@
 | T-01 | 已完成 | 见 `git log`（feat: 版本快照去重与保留策略） | 人工自审通过：去重/回填/保留策略/锁修正/`.versions` 排除（本地扫描+云同步收发双侧）均已实现；**待**有 Flutter SDK 环境执行 `flutter pub get`（新增 crypto 依赖）→ `flutter analyze` → `flutter test` → `flutter build apk --debug`，并按验收标准实测 |
 | T-02 | 已完成 | 见 `git log`（feat: 云同步台账三方比较与并发传输） | 新增 `lib/services/sync_ledger.dart`（SHA-256 内容哈希 + 远程 mtime 容差 2s 的三方比较，绑定工作区，工作区变更自动重置）；syncAll 重构为「比较→并发上传(4)→刷新远程列表→并发下载→台账落盘」；单文件失败指数退避重试 3 次，失败不写台账=天然续传；previewSync 未变更文件不再因 mtime 漂移误报冲突；UI 增加失败计数提示。**待** SDK 环境构建验证 + 真机 WebDAV 实测（首次同步逐文件初始化台账，无批量重传） |
 | T-03 | 已完成 | 见 `git log`（feat: 应用内更新完整性/签名校验与 https 代理白名单） | ① CI 生成 checksums.txt 并随 release 发布；② 更新检查拉取 checksums.txt，下载后 SHA-256 校验，不匹配拒绝安装并删除文件；③ MainActivity.installApk 增加包身份/签名一致性/防降级三重校验，拒绝原因回传 UI 展示；④ 代理前缀与目标 URL 仅允许 https；⑤ 新增 test/build_proxy_url_test.dart 覆盖白名单。**待** SDK 环境构建验证 + 真机实测（正常更新 / 篡改 APK / 配置 http 代理被忽略 / 降级包被拒绝） |
+| T-04 | 已完成 | 见 `git log`（feat: WebView CSP 与 bridge 消息白名单） | 实施决策：**以 CSP 替代 DOMPurify**——Vite 产物为外链脚本无内联代码，`script-src 'self'` 即可阻断注入脚本的执行（含 innerHTML 注入的内联事件处理器），内容渲染本就走 ProseMirror schema 白名单，无需额外引入 DOMPurify 依赖。三项落地：① 删除死代码 sanitizeMarkdown 及其全部正则（可被绕过且从未被调用），保留在用的 sanitizeUrl（L1268 图片 src）；② `web/milkdown/index.html` 与 `assets/milkdown_web/index.html`（构建产物）同步注入 CSP meta；③ JS→Flutter bridge 增加 19 种消息类型白名单（与 main.js emit 全集核对），未知类型拒绝转发并记录。**待** SDK 环境构建 + 真机验证编辑器功能正常（若 CSP 误伤按注释放宽对应指令） |
