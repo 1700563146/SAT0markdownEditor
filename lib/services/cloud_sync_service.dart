@@ -12,6 +12,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
 import 'sync_service_interface.dart';
 import 'my_files_service.dart';
+import 'version_service.dart';
 import '../utils/debug_log.dart';
 
 /// 同步状态枚举
@@ -435,6 +436,9 @@ class CloudSyncService {
       if (entity is File) {
         files.add(entity);
       } else if (entity is Directory) {
+        // 跳过版本快照目录，版本历史不参与云同步
+        final name = entity.path.split(RegExp(r'[/\\]')).last;
+        if (name == VersionService.versionsDirName) continue;
         await _collectFilesRecursive(entity, files);
       }
     }
@@ -456,6 +460,8 @@ class CloudSyncService {
 
     for (final file in remoteFiles) {
       if (file.isDirectory) {
+        // 跳过远程版本快照目录，避免把历史遗留数据重新下载回工作区
+        if (file.name == VersionService.versionsDirName) continue;
         final subPath = path.isEmpty ? file.name : '$path/${file.name}';
         await _collectRemoteFilesRecursive(subPath, files);
       } else {

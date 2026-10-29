@@ -16,6 +16,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../models/markdown_file.dart';
+import 'version_service.dart';
 import '../utils/debug_log.dart';
 
 /// 文件过大异常
@@ -295,6 +296,12 @@ class FileService {
       // 递归扫描所有子目录
       await for (final entity in directory.list(recursive: true)) {
         if (entity is File) {
+          // 跳过版本快照目录（.versions），避免污染文件列表与搜索
+          if (entity.path
+              .split(RegExp(r'[/\\]'))
+              .contains(VersionService.versionsDirName)) {
+            continue;
+          }
           final path = entity.path.toLowerCase();
           // 只处理 Markdown 文件
           if (path.endsWith('.md') || path.endsWith('.markdown')) {

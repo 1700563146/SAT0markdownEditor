@@ -30,6 +30,9 @@ class DocumentVersion {
   /// 版本文件大小（字节）
   final int fileSize;
 
+  /// 版本内容 SHA-256 哈希（用于快照去重；旧元数据中可能缺失）
+  final String? contentHash;
+
   // ==================== 构造函数 ====================
 
   const DocumentVersion({
@@ -40,6 +43,7 @@ class DocumentVersion {
     required this.filePath,
     required this.versionPath,
     required this.fileSize,
+    this.contentHash,
   });
 
   // ==================== 计算属性 ====================
@@ -73,6 +77,7 @@ class DocumentVersion {
       filePath: json['filePath'] as String,
       versionPath: json['versionPath'] as String,
       fileSize: json['fileSize'] as int,
+      contentHash: json['contentHash'] as String?,
     );
   }
 
@@ -86,6 +91,7 @@ class DocumentVersion {
       'filePath': filePath,
       'versionPath': versionPath,
       'fileSize': fileSize,
+      'contentHash': contentHash,
     };
   }
 
@@ -100,6 +106,7 @@ class DocumentVersion {
     String? filePath,
     String? versionPath,
     int? fileSize,
+    String? contentHash,
   }) {
     return DocumentVersion(
       versionId: versionId ?? this.versionId,
@@ -109,6 +116,7 @@ class DocumentVersion {
       filePath: filePath ?? this.filePath,
       versionPath: versionPath ?? this.versionPath,
       fileSize: fileSize ?? this.fileSize,
+      contentHash: contentHash ?? this.contentHash,
     );
   }
 

@@ -58,6 +58,9 @@ dependencies:
   
   # Path utilities
   path: ^1.9.0
+
+  # SHA-256 hashing（版本快照内容去重）
+  crypto: ^3.0.3
   
   
   # URL launcher
