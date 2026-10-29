@@ -1,0 +1,528 @@
+import 'dart:io';
+import 'dart:ui' show lerpDouble;
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../l10n/app_localizations.dart';
+import '../providers/file_provider.dart';
+import '../models/file_sort_option.dart';
+import '../services/folder_sort_service.dart';
+import '../services/file_service.dart';
+import '../utils/app_style.dart';
+import '../utils/file_actions.dart';
+import '../widgets/empty_state.dart';
+import '../widgets/app_background.dart';
+import '../widgets/outer_shadow.dart';
+import '../utils/responsive_layout.dart';
+import '../widgets/responsive_page_frame.dart';
+import 'folder/components/folder_browser_header.dart';
+import 'folder/components/file_tile.dart';
+
+class FolderBrowserScreen extends StatefulWidget {
+  final String folderPath;
+  final bool showBackButton;
+  final String? title;
+  final double bottomPadding;
+
+  const FolderBrowserScreen({
+    super.key,
+    required this.folderPath,
+    this.showBackButton = true,
+    this.title,
+    this.bottomPadding = 0,
+  });
+
+  @override
+  State<FolderBrowserScreen> createState() => FolderBrowserScreenState();
+}
+
+class FolderBrowserScreenState extends State<FolderBrowserScreen> {
+  final TextEditingController _searchController = TextEditingController();
+  final FolderSortService _sortService = FolderSortService();
+
+  bool _isSearching = false;
+  bool _isLoading = true;
+  bool _showImages = false; // 默认不显示图片
+
+  List<FileSystemEntity> _entities = [];
+  String? _error;
+  FileSortOption _sortOption = FileSortOption.nameAsc;
+
+  /// 刷新文件列表（公开方法，供外部调用）
+  void refresh() {
+    _loadFiles();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _initAndLoad();
+  }
+
+  Future<void> _initAndLoad() async {
+    await _sortService.init();
+    if (mounted) {
+      final index = _sortService.getSortOptionIndex(widget.folderPath);
+      if (index >= 0 && index < FileSortOption.values.length) {
+        _sortOption = FileSortOption.values[index];
+      }
+      _loadFiles();
+    }
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadFiles() async {
+    if (!mounted) return;
+    final l10n = AppLocalizations.of(context);
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+
+    try {
+      final dir = Directory(widget.folderPath);
+      if (!await dir.exists()) {
+        throw Exception(l10n?.folderNotFound ?? 'Folder not found');
+      }
+
+      final entities = await dir.list().toList();
+      debugPrint('[FolderBrowser] _loadFiles: dir=${widget.folderPath}, entityCount=${entities.length}');
+      for (final e in entities) {
+        debugPrint('[FolderBrowser]   entity: type=${e.runtimeType}, isDir=${e is Directory}, isFile=${e is File}, path=${e.path}');
+      }
+      _entities = entities.where((e) {
+        final name = e.path.split(Platform.pathSeparator).last;
+        if (name.startsWith('.')) return false; // 隐藏隐藏文件
+
+        final isDir = e is Directory;
+        if (isDir) return true;
+
+        // 文件过滤
+        if (_isTextMarkdownFile(e as File)) return true;
+        if (_showImages && _isImage(name)) return true;
+
+        return false;
+      }).toList();
+
+      _sortFiles();
+    } catch (e) {
+      _error = e.toString();
+      _entities = [];
+    }
+
+    if (mounted) {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  bool _isImage(String name) {
+    final lower = name.toLowerCase();
+    return lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.png') ||
+        lower.endsWith('.gif') ||
+        lower.endsWith('.webp');
+  }
+
+  bool _isTextMarkdownFile(File file) {
+    final name = file.path.split(Platform.pathSeparator).last;
+    final lower = name.toLowerCase();
+    if (lower.endsWith('.md') ||
+        lower.endsWith('.markdown') ||
+        lower.endsWith('.txt')) {
+      return true;
+    }
+    if (name.contains('.')) return false;
+    try {
+      final randomAccess = file.openSync();
+      try {
+        final bytes = randomAccess.readSync(FileService.binaryProbeBytes);
+        return FileService.looksLikeTextBytes(bytes);
+      } finally {
+        randomAccess.closeSync();
+      }
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _sortFiles() {
+    if (_sortOption == FileSortOption.custom) {
+      _entities = _sortService.sortEntities(widget.folderPath, _entities);
+      if (mounted) setState(() {});
+      return;
+    }
+
+    _entities.sort((a, b) {
+      final aIsDir = a is Directory;
+      final bIsDir = b is Directory;
+
+      // 始终让文件夹排在前面 (除非自定义排序?)
+      // 通常文件管理器也是文件夹优先，这里保持一致
+      if (aIsDir && !bIsDir) return -1;
+      if (!aIsDir && bIsDir) return 1;
+
+      final nameA = a.path.split(Platform.pathSeparator).last;
+      final nameB = b.path.split(Platform.pathSeparator).last;
+
+      switch (_sortOption) {
+        case FileSortOption.nameAsc:
+          return nameA.toLowerCase().compareTo(nameB.toLowerCase());
+        case FileSortOption.nameDesc:
+          return nameB.toLowerCase().compareTo(nameA.toLowerCase());
+        case FileSortOption.dateAsc:
+          return FileSystemEntity.isFileSync(a.path) &&
+                  FileSystemEntity.isFileSync(b.path)
+              ? File(
+                  a.path,
+                ).lastModifiedSync().compareTo(File(b.path).lastModifiedSync())
+              : 0; // Folder date sort might be inaccurate, keeping simple
+        case FileSortOption.dateDesc:
+          return FileSystemEntity.isFileSync(a.path) &&
+                  FileSystemEntity.isFileSync(b.path)
+              ? File(
+                  b.path,
+                ).lastModifiedSync().compareTo(File(a.path).lastModifiedSync())
+              : 0;
+        case FileSortOption.sizeAsc:
+          return FileSystemEntity.isFileSync(a.path) &&
+                  FileSystemEntity.isFileSync(b.path)
+              ? File(a.path).lengthSync().compareTo(File(b.path).lengthSync())
+              : 0;
+        case FileSortOption.sizeDesc:
+          return FileSystemEntity.isFileSync(a.path) &&
+                  FileSystemEntity.isFileSync(b.path)
+              ? File(b.path).lengthSync().compareTo(File(a.path).lengthSync())
+              : 0;
+        default:
+          return nameA.toLowerCase().compareTo(nameB.toLowerCase());
+      }
+    });
+
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _handleReorder(int oldIndex, int newIndex) async {
+    if (oldIndex < newIndex) {
+      newIndex -= 1;
+    }
+
+    // 如果当前不是自定义排序，拖拽后自动切换为自定义排序
+    if (_sortOption != FileSortOption.custom) {
+      setState(() {
+        _sortOption = FileSortOption.custom;
+      });
+      await _sortService.saveSortOption(
+        widget.folderPath,
+        FileSortOption.custom.index,
+      );
+    }
+
+    setState(() {
+      final item = _entities.removeAt(oldIndex);
+      _entities.insert(newIndex, item);
+    });
+
+    // 保存新顺序
+    final filenames = _entities
+        .map((e) => e.path.split(Platform.pathSeparator).last)
+        .toList();
+    await _sortService.saveOrder(widget.folderPath, filenames);
+  }
+
+  List<FileSystemEntity> get _filteredFiles {
+    final query = _searchController.text.toLowerCase();
+    if (query.isEmpty) return _entities;
+    return _entities.where((e) {
+      final name = e.path.split(Platform.pathSeparator).last.toLowerCase();
+      return name.contains(query);
+    }).toList();
+  }
+
+  void _showNewItemMenu() {
+    final l10n = AppLocalizations.of(context);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) => Container(
+        decoration: BoxDecoration(
+          color: Theme.of(sheetContext).colorScheme.surface,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.note_add, color: Colors.blue),
+              title: Text(l10n?.newMarkdown ?? 'New Markdown'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                // 这里必须用页面自己的 context：菜单收起后 sheetContext 就失效了，
+                // 拿它去创建只会让后半段流程整段跳过。
+                FileActions.showCreateFileInFolderDialog(
+                  context,
+                  widget.folderPath,
+                  context.read<FileProvider>(),
+                  onRefresh: _loadFiles,
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.create_new_folder,
+                color: Colors.orange,
+              ),
+              title: Text(l10n?.newFolder ?? 'New Folder'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _showCreateFolderDialog();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showCreateFolderDialog() {
+    final l10n = AppLocalizations.of(context);
+    // 简化的新建文件夹 Dialog，直接在当前目录
+    final nameController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        title: Text(l10n?.createFolder ?? 'Create Folder'),
+        content: TextField(
+          controller: nameController,
+          autofocus: true,
+          decoration: InputDecoration(
+            labelText: l10n?.folderName ?? 'Folder Name',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: Text(l10n?.cancel ?? 'Cancel'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.pop(dialogContext);
+              if (nameController.text.isNotEmpty) {
+                try {
+                  final newPath =
+                      '${widget.folderPath}${Platform.pathSeparator}${nameController.text}';
+                  await Directory(newPath).create();
+                  _loadFiles();
+                } catch (e) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          '${l10n?.createFailed ?? 'Create failed'}: $e',
+                        ),
+                      ),
+                    );
+                  }
+                }
+              }
+            },
+            child: Text(l10n?.create ?? 'Create'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    final folderName = widget.folderPath.split(Platform.pathSeparator).last;
+
+    String displayName;
+    if (widget.title != null) {
+      displayName = widget.title!;
+    } else if (folderName == 'Ushio-MD' || folderName == 'Ushio-md') {
+      displayName = l10n?.myFiles ?? 'My Files';
+    } else {
+      displayName = folderName;
+    }
+
+    // Core content – shared between tab and standalone modes.
+    final content = SafeArea(
+      child: Column(
+        children: [
+          FolderBrowserHeader(
+            folderName: displayName,
+            fileCount: _entities.length,
+            isSearching: _isSearching,
+            onSearchToggle: () {
+              setState(() {
+                if (_isSearching) {
+                  _isSearching = false;
+                  _searchController.clear();
+                } else {
+                  _isSearching = true;
+                }
+              });
+            },
+            searchController: _searchController,
+            onSearchChanged: (value) => setState(() {}),
+            sortOption: _sortOption,
+            onSortChanged: (option) async {
+              setState(() => _sortOption = option);
+              await _sortService.saveSortOption(
+                widget.folderPath,
+                option.index,
+              );
+              _sortFiles();
+            },
+            onBack: widget.showBackButton ? () => Navigator.pop(context) : null,
+            showImages: _showImages,
+            onImageToggle: () {
+              setState(() => _showImages = !_showImages);
+              _loadFiles();
+            },
+            onNewItem: _showNewItemMenu,
+          ),
+          Expanded(child: _buildContent()),
+        ],
+      ),
+    );
+
+    if (!widget.showBackButton) {
+      // Tab mode: no own background – the parent AppBackground provides it.
+      return Scaffold(backgroundColor: Colors.transparent, body: content);
+    }
+
+    // Standalone (pushed) mode: wrap with AppBackground so the screen has a
+    // consistent background when opened as a subfolder navigation target.
+    return AppBackground(
+      wrapWithSafeArea: false,
+      child: Scaffold(backgroundColor: Colors.transparent, body: content),
+    );
+  }
+
+  Widget _wrapFileList(Widget child) {
+    if (!ResponsiveLayout.isDesktopWidth(context)) {
+      return child;
+    }
+    return SingleChildScrollView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      child: ResponsivePageFrame(child: child),
+    );
+  }
+
+  Widget _buildContent() {
+    final l10n = AppLocalizations.of(context);
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_error != null) {
+      return Center(
+        child: Text(
+          '${l10n?.loadFailed ?? 'Load failed'}: $_error',
+          style: const TextStyle(color: Colors.red),
+        ),
+      );
+    }
+
+    if (_entities.isEmpty) {
+      return EmptyState(message: l10n?.folderEmpty ?? 'Folder is empty');
+    }
+
+    final filtered = _filteredFiles;
+    if (filtered.isEmpty) {
+      return EmptyState(message: l10n?.noMatchingFiles ?? 'No matching files');
+    }
+
+    // 始终使用 ReorderableListView 以支持拖拽排序 (如果处于非自定义排序，拖拽后会自动切换到自定义)
+    // 只有在搜索时禁用拖拽(? 搜索结果通常不建议拖拽排序，因为索引不对应)
+    if (_isSearching && _searchController.text.isNotEmpty) {
+      return RefreshIndicator(
+        onRefresh: _loadFiles,
+        child: _wrapFileList(
+          Padding(
+            padding: EdgeInsets.only(
+              top: ResponsiveLayout.isDesktopWidth(context) ? 0 : 12,
+              bottom: widget.bottomPadding,
+            ),
+            child: Column(
+              children: [
+                for (final entity in filtered)
+                  FileTile(
+                    entity: entity,
+                    onRefresh: _loadFiles,
+                    isDraggable: false,
+                    source: FileSource.myFiles,
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _loadFiles,
+      child: _wrapFileList(
+        ReorderableListView.builder(
+          shrinkWrap: ResponsiveLayout.isDesktopWidth(context),
+          physics: ResponsiveLayout.isDesktopWidth(context)
+              ? const NeverScrollableScrollPhysics()
+              : const AlwaysScrollableScrollPhysics(),
+          padding: ResponsiveLayout.isDesktopWidth(context)
+              ? EdgeInsets.only(bottom: widget.bottomPadding)
+              : EdgeInsets.fromLTRB(20, 12, 20, 20 + widget.bottomPadding),
+          itemCount: filtered.length,
+          buildDefaultDragHandles: false, // 禁用默认的长按拖拽，使用 FileTile 内部的 Handle
+          onReorder: _handleReorder,
+          proxyDecorator: (child, index, animation) {
+            return AnimatedBuilder(
+              animation: animation,
+              builder: (BuildContext context, Widget? child) {
+                final double animValue = Curves.easeInOut.transform(
+                  animation.value,
+                );
+                final double scale = lerpDouble(1.0, 1.05, animValue)!;
+                final appStyle = Theme.of(context).extension<AppStyleTheme>()!;
+                return Transform.scale(
+                  scale: scale,
+                  child: OuterShadow(
+                    // 半透明的 Material 兜不住自己的物理阴影，会透进拖拽中的
+                    // 磁贴变成内阴影；阴影改画在外侧。
+                    shadows: appStyle.outerShadow(prominent: true),
+                    borderRadius: BorderRadius.circular(
+                      ResponsiveLayout.cardRadius(context),
+                    ),
+                    child: child,
+                  ),
+                );
+              },
+              child: child,
+            );
+          },
+          itemBuilder: (context, index) {
+            final entity = filtered[index];
+            return Container(
+              key: ValueKey(entity.path),
+              child: FileTile(
+                entity: entity,
+                onRefresh: _loadFiles,
+                isDraggable: true, // 总是显示拖拽手柄
+                index: index, // 传递 index 给 ReorderableDragStartListener
+                source: FileSource.myFiles,
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}

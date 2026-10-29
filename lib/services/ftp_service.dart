@@ -1,0 +1,402 @@
+// ============================================================================
+// FTP 服务
+//
+// 封装 FTP 客户端操作，提供：
+// - 连接测试
+// - 文件上传/下载
+// - 目录列表
+// - 文件删除
+//
+// ⚠️ 安全警告 (DEPRECATED)：
+// FTP 协议不加密传输，凭据和文件内容以明文传输，存在中间人攻击风险。
+// 建议：
+// 1. 使用 WebDAV (HTTPS) 替代
+// 2. 或使用 FTPS (FTP over TLS)
+// 3. 仅在可信网络环境下使用
+//
+// 此服务将在未来版本中移除或重构为 FTPS。
+// ============================================================================
+
+import 'dart:io';
+import 'package:flutter/foundation.dart';
+import 'package:ftpconnect/ftpconnect.dart';
+import 'sync_service_interface.dart';
+import '../utils/debug_log.dart';
+
+/// FTP 连接配置
+class FTPConfig {
+  final String host;
+  final int port;
+  final String username;
+  final String password;
+
+  const FTPConfig({
+    required this.host,
+    this.port = 21,
+    required this.username,
+    required this.password,
+  });
+
+  /// 检查配置是否完整
+  bool get isValid =>
+      host.isNotEmpty && username.isNotEmpty && password.isNotEmpty;
+
+  /// 从 Map 创建配置
+  factory FTPConfig.fromMap(Map<String, dynamic> map) {
+    return FTPConfig(
+      host: map['host'] ?? '',
+      port: map['port'] ?? 21,
+      username: map['username'] ?? '',
+      password: map['password'] ?? '',
+    );
+  }
+
+  /// 转换为 Map
+  Map<String, dynamic> toMap() {
+    return {
+      'host': host,
+      'port': port,
+      'username': username,
+      'password': password,
+    };
+  }
+}
+
+/// FTP 服务类
+///
+/// ⚠️ 已弃用：FTP 协议不安全，凭据和文件内容以明文传输。
+/// 请改用 WebDAV (HTTPS) 或等待 FTPS 支持。
+@Deprecated('FTP is insecure. Use WebDAV (HTTPS) instead.')
+class FTPService implements SyncServiceInterface {
+  FTPConnect? _ftpClient;
+
+  /// 云端工作区目录名称（可配置）
+  String _remoteWorkspaceName = 'Ushio-MD';
+
+  /// 云端路径前缀（可配置）
+  String _remotePathPrefix = '';
+
+  /// 获取当前工作区名称
+  @override
+  String get remoteWorkspaceName => _remoteWorkspaceName;
+
+  /// 获取当前路径前缀
+  @override
+  String get remotePathPrefix => _remotePathPrefix;
+
+  /// 设置工作区名称
+  @override
+  void setRemoteWorkspaceName(String name) {
+    _remoteWorkspaceName = name;
+  }
+
+  /// 设置远程路径前缀
+  @override
+  void setRemotePathPrefix(String prefix) {
+    _remotePathPrefix = prefix;
+  }
+
+  /// 获取完整的远程工作区路径（路径前缀 + 文件夹名称）
+  @override
+  String getFullRemotePath() {
+    String fullPath = _remotePathPrefix.trim();
+
+    // 确保路径以 / 开头
+    if (fullPath.isNotEmpty && !fullPath.startsWith('/')) {
+      fullPath = '/$fullPath';
+    }
+
+    // 确保路径以 / 结尾（如果有路径前缀）
+    if (fullPath.isNotEmpty && !fullPath.endsWith('/')) {
+      fullPath += '/';
+    }
+
+    // 自动补齐文件夹名称（如果路径不以文件夹名称结尾）
+    if (!fullPath.endsWith('$_remoteWorkspaceName/') &&
+        !fullPath.endsWith(_remoteWorkspaceName)) {
+      fullPath += _remoteWorkspaceName;
+    }
+
+    // 如果没有路径前缀，直接返回 /文件夹名称
+    if (_remotePathPrefix.trim().isEmpty) {
+      return '/$_remoteWorkspaceName';
+    }
+
+    return fullPath;
+  }
+
+  /// 初始化 FTP 客户端
+  void initialize(FTPConfig config) {
+    if (!config.isValid) {
+      _ftpClient = null;
+      return;
+    }
+
+    _ftpClient = FTPConnect(
+      config.host,
+      port: config.port,
+      user: config.username,
+      pass: config.password,
+    );
+  }
+
+  /// 测试连接
+  @override
+  Future<bool> testConnection() async {
+    if (_ftpClient == null) return false;
+
+    try {
+      await _ftpClient!.connect();
+      await _ftpClient!.disconnect();
+      return true;
+    } catch (e) {
+      appDebugLog('FTP 连接测试失败: $e');
+      // 确保在异常时关闭连接
+      try {
+        await _ftpClient!.disconnect();
+      } catch (disconnectError) {
+        appDebugLog('FTP 断开连接失败: $disconnectError');
+      }
+      return false;
+    }
+  }
+
+  /// 确保远程工作区目录存在
+  @override
+  Future<void> ensureRemoteWorkspace() async {
+    if (_ftpClient == null) return;
+
+    await _safeExecute<void>('创建远程目录', () async {
+      final remotePath = getFullRemotePath();
+      // 递归创建目录路径
+      await _ensureRemoteDir(remotePath);
+    });
+  }
+
+  /// 列出远程目录内容
+  ///
+  /// [remotePath] 远程路径（相对于工作区根目录）
+  @override
+  Future<List<RemoteFileInfo>?> listRemoteFiles({
+    String remotePath = '',
+  }) async {
+    return _safeExecute<List<RemoteFileInfo>>('列出目录', () async {
+      final fullRemotePath = getFullRemotePath();
+      final path = remotePath.isEmpty
+          ? fullRemotePath
+          : '$fullRemotePath/$remotePath';
+
+      // Change to the directory before listing
+      await _ftpClient!.changeDirectory(path);
+      final files = await _ftpClient!.listDirectoryContent();
+
+      // 转换为通用格式
+      return files
+          .map(
+            (f) => RemoteFileInfo(
+              name: f.name,
+              path: '$path/${f.name}',
+              isDirectory: f.type == FTPEntryType.dir,
+              modifiedTime: f.modifyTime,
+            ),
+          )
+          .toList();
+    });
+  }
+
+  /// 上传文件
+  ///
+  /// [localPath] 本地文件路径
+  /// [remotePath] 远程文件路径（相对于工作区）
+  @override
+  Future<bool> uploadFile(String localPath, String remotePath) async {
+    final file = File(localPath);
+    if (!await file.exists()) {
+      appDebugLog('FTP 上传失败：本地文件不存在 $localPath');
+      return false;
+    }
+
+    final fullRemotePath = getFullRemotePath();
+    final targetPath = '$fullRemotePath/$remotePath';
+    final parentPath = targetPath.substring(0, targetPath.lastIndexOf('/'));
+
+    final result = await _safeExecuteBool('上传文件', () async {
+      // 确保父目录存在
+      await _ensureRemoteDir(parentPath);
+
+      // 上传文件
+      final success = await _ftpClient!.uploadFile(
+        file,
+        sRemoteName: targetPath,
+      );
+
+      if (success) {
+        appDebugLog('FTP 上传成功: $localPath -> $targetPath');
+      } else {
+        appDebugLog('FTP 上传失败: $localPath -> $targetPath');
+      }
+      return success;
+    });
+
+    return result;
+  }
+
+  /// 下载文件
+  ///
+  /// [remotePath] 远程文件路径（相对于工作区）
+  /// [localPath] 本地保存路径
+  @override
+  Future<bool> downloadFile(String remotePath, String localPath) async {
+    // 确保本地父目录存在
+    final localDir = localPath.substring(
+      0,
+      localPath.lastIndexOf(Platform.pathSeparator),
+    );
+    await Directory(localDir).create(recursive: true);
+
+    final fullRemotePath = getFullRemotePath();
+    final sourcePath = '$fullRemotePath/$remotePath';
+
+    final result = await _safeExecuteBool('下载文件', () async {
+      // 下载文件
+      final success = await _ftpClient!.downloadFile(
+        sourcePath,
+        File(localPath),
+      );
+
+      if (success) {
+        appDebugLog('FTP 下载成功: $sourcePath -> $localPath');
+      } else {
+        appDebugLog('FTP 下载失败: $sourcePath -> $localPath');
+      }
+      return success;
+    });
+
+    return result;
+  }
+
+  /// 删除远程文件或目录
+  @override
+  Future<bool> deleteRemote(String remotePath) async {
+    final fullRemotePath = getFullRemotePath();
+    final targetPath = '$fullRemotePath/$remotePath';
+
+    final result = await _safeExecuteBool('删除文件', () async {
+      final success = await _ftpClient!.deleteFile(targetPath);
+
+      if (success) {
+        appDebugLog('FTP 删除成功: $targetPath');
+      } else {
+        appDebugLog('FTP 删除失败: $targetPath');
+      }
+      return success;
+    });
+
+    return result;
+  }
+
+  /// 获取远程文件信息
+  @override
+  Future<RemoteFileInfo?> getRemoteFileInfo(String remotePath) async {
+    try {
+      final parentPath = remotePath.contains('/')
+          ? remotePath.substring(0, remotePath.lastIndexOf('/'))
+          : '';
+      final fileName = remotePath.contains('/')
+          ? remotePath.substring(remotePath.lastIndexOf('/') + 1)
+          : remotePath;
+
+      final files = await listRemoteFiles(remotePath: parentPath);
+      return files?.firstWhere(
+        (f) => f.name == fileName,
+        orElse: () => throw Exception('文件不存在'),
+      );
+    } catch (e) {
+      appDebugLog('FTP 获取文件信息失败: $e');
+      return null;
+    }
+  }
+
+  // ==================== 私有方法 ====================
+
+  /// 安全执行 FTP 操作，确保连接正确关闭
+  ///
+  /// [operation] 要执行的 FTP 操作
+  /// [operationName] 操作名称（用于日志）
+  /// 返回操作结果，异常时返回 null
+  Future<T?> _safeExecute<T>(
+    String operationName,
+    Future<T> Function() operation,
+  ) async {
+    if (_ftpClient == null) {
+      appDebugLog('FTP $operationName 失败: 客户端未初始化');
+      return null;
+    }
+
+    try {
+      await _ftpClient!.connect();
+      final result = await operation();
+      await _ftpClient!.disconnect();
+      return result;
+    } catch (e) {
+      appDebugLog('FTP $operationName 失败: $e');
+      // 确保在异常时关闭连接
+      try {
+        await _ftpClient!.disconnect();
+      } catch (disconnectError) {
+        appDebugLog('FTP 断开连接失败: $disconnectError');
+      }
+      return null;
+    }
+  }
+
+  /// 安全执行 FTP 操作（无返回值版本）
+  ///
+  /// [operation] 要执行的 FTP 操作
+  /// [operationName] 操作名称（用于日志）
+  /// 返回是否成功
+  Future<bool> _safeExecuteBool(
+    String operationName,
+    Future<bool> Function() operation,
+  ) async {
+    if (_ftpClient == null) {
+      appDebugLog('FTP $operationName 失败: 客户端未初始化');
+      return false;
+    }
+
+    try {
+      await _ftpClient!.connect();
+      final result = await operation();
+      await _ftpClient!.disconnect();
+      return result;
+    } catch (e) {
+      appDebugLog('FTP $operationName 失败: $e');
+      // 确保在异常时关闭连接
+      try {
+        await _ftpClient!.disconnect();
+      } catch (disconnectError) {
+        appDebugLog('FTP 断开连接失败: $disconnectError');
+      }
+      return false;
+    }
+  }
+
+  /// 确保远程目录存在（递归创建）
+  Future<void> _ensureRemoteDir(String remotePath) async {
+    if (_ftpClient == null) return;
+
+    final parts = remotePath.split('/').where((p) => p.isNotEmpty).toList();
+    String currentPath = '';
+
+    for (final part in parts) {
+      currentPath += '/$part';
+      try {
+        // 尝试创建目录，如果已存在会失败但不影响后续操作
+        await _ftpClient!.makeDirectory(currentPath);
+      } catch (e) {
+        // 目录可能已存在，继续处理下一级
+        appDebugLog('FTP 创建目录 $currentPath: $e');
+      }
+    }
+  }
+}

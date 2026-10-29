@@ -1,0 +1,2 @@
+This legacy liquid glass filter shader was superseded by the
+liquid_glass_widgets package. Kept outside the build path pending removal.

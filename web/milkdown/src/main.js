@@ -1,0 +1,4223 @@
+import {
+  commandsCtx,
+  editorViewCtx,
+  parserCtx,
+  serializerCtx,
+} from '@milkdown/core';
+import { Crepe } from '@milkdown/crepe';
+import { Plugin, PluginKey } from '@milkdown/prose/state';
+import { Decoration, DecorationSet } from '@milkdown/prose/view';
+import { automd } from '@milkdown/plugin-automd';
+import { cursor } from '@milkdown/plugin-cursor';
+// 仅使用 remark-emoji(:shortcode: → 原生 Unicode)与 emoji 节点 schema。
+// 刻意不引入 remarkTwemojiPlugin：它会把 emoji 转成指向 jsdelivr 的 <img>，
+// 而 jsdelivr 现已 301 跳转到 raw.githubusercontent.com（国内被重置）→ 裂图。
+// 改用系统原生 emoji 文本渲染：离线可用、即时、永不裂图，且 markdown 往返不丢字。
+import { emojiAttr, emojiSchema, remarkEmojiPlugin } from '@milkdown/plugin-emoji';
+import { highlight, highlightPluginConfig } from '@milkdown/plugin-highlight';
+import { listener, listenerCtx } from '@milkdown/plugin-listener';
+import { redoCommand, undoCommand } from '@milkdown/plugin-history';
+import { redoDepth, undoDepth } from '@milkdown/prose/history';
+import { math } from '@milkdown/plugin-math';
+import { upload, uploadConfig } from '@milkdown/plugin-upload';
+import {
+  insertHrCommand,
+  createCodeBlockCommand,
+  insertImageCommand,
+  toggleInlineCodeCommand,
+  toggleLinkCommand,
+  wrapInBlockquoteCommand,
+  wrapInBulletListCommand,
+  wrapInHeadingCommand,
+  wrapInOrderedListCommand,
+  toggleEmphasisCommand,
+  toggleStrongCommand,
+} from '@milkdown/preset-commonmark';
+import { insertTableCommand } from '@milkdown/preset-gfm';
+import {
+  addColAfterCommand,
+  addColBeforeCommand,
+  addRowAfterCommand,
+  addRowBeforeCommand,
+  deleteSelectedCellsCommand,
+  goToNextTableCellCommand,
+  goToPrevTableCellCommand,
+  toggleStrikethroughCommand,
+} from '@milkdown/preset-gfm';
+import { deleteColumn, deleteRow, isInTable } from '@milkdown/prose/tables';
+import { createParser as createRefractorParser } from 'prosemirror-highlight/refractor';
+// refractor/common 只打包 36 种主流语言；原先用 refractor/all 会打包 ~594 种语言，
+// 是 5MB bundle 与“打开文档”时 JS 解析/求值卡顿的主要来源之一。
+import { refractor } from 'refractor';
+import refractorDart from 'refractor/dart';
+import refractorTsx from 'refractor/tsx';
+import refractorJsx from 'refractor/jsx';
+import refractorToml from 'refractor/toml';
+import refractorGraphql from 'refractor/graphql';
+import refractorGroovy from 'refractor/groovy';
+import refractorScala from 'refractor/scala';
+import refractorPowershell from 'refractor/powershell';
+import refractorBatch from 'refractor/batch';
+import refractorProtobuf from 'refractor/protobuf';
+import refractorCmake from 'refractor/cmake';
+import refractorNginx from 'refractor/nginx';
+import refractorHaskell from 'refractor/haskell';
+import refractorElixir from 'refractor/elixir';
+import refractorErlang from 'refractor/erlang';
+import refractorClojure from 'refractor/clojure';
+import refractorJulia from 'refractor/julia';
+import refractorSolidity from 'refractor/solidity';
+import refractorApex from 'refractor/apex';
+import refractorFortran from 'refractor/fortran';
+import refractorNasm from 'refractor/nasm';
+import refractorMermaid from 'refractor/mermaid';
+import refractorPlantUml from 'refractor/plant-uml';
+import { nord } from '@milkdown/theme-nord';
+import { $prose, replaceAll } from '@milkdown/utils';
+// CodeMirror themes for code block syntax highlighting
+import { oneDark } from '@codemirror/theme-one-dark';
+import { githubDark, githubLight } from '@uiw/codemirror-theme-github';
+import { nord as nordTheme } from '@uiw/codemirror-theme-nord';
+import { material } from '@uiw/codemirror-theme-material';
+import '@milkdown/crepe/theme/nord.css';
+import 'katex/dist/katex.min.css';
+import 'prismjs/themes/prism.css';
+import './style.css';
+import {
+  HTML_BLOCK_TAG_PATTERN,
+  HTML_BLOCK_CLOSE_TAG_PATTERN,
+  slugifyHeading,
+  parseMarkdownOutline,
+  collectFenceLanguages,
+  collectMarkdownImageSources,
+  stripGhostCodeLanguageMarkers,
+  wrapHtmlBlocksInCodeFence,
+  setKnownCodeLanguages,
+  findAppendSplitPoints,
+} from './markdown-scans.mjs';
+import {
+  HTML_BLOCK_LANGUAGE,
+  HTML_BLOCK_NODE,
+  remarkHtmlBlockFence,
+  ushioHtmlBlockSchema,
+} from './html-block-node.mjs';
+import {
+  splitFrontmatter,
+  ushioBulletListSchema,
+  ushioImageBlockSchema,
+  ushioListItemSchema,
+  ushioOrderedListSchema,
+} from './md-fidelity.mjs';
+import { lazyCodeBlockView, mountAllLazyCodeBlocks } from './lazy-code-block.mjs';
+import {
+  LOCAL_FILE_SCHEME,
+  toAbsoluteLocalPath,
+  buildLocalFileProxyUrl,
+  preprocessImageUrlsInMarkdown,
+  deproxyImageUrlsInMarkdown,
+} from './local-path.mjs';
+import {
+  perfNow,
+  perfStart,
+  perfMarkKeyDown,
+  perfNoteHint,
+  perfNoteCaret,
+  perfRecordChain,
+  perfRecordSettle,
+  perfRecordEvent,
+  perfSetSections,
+  perfSections,
+  perfDump,
+  perfSetEnabled,
+  perfSnapshot,
+  perfObserveFrames,
+  perfStartSections,
+  perfStartBootPhases,
+  perfSetBoot,
+  perfBoot,
+} from './perf.mjs';
+
+const app = document.getElementById('app');
+let bridgeSeq = 0;
+let editorInstance = null;
+let crepeInstance = null;
+let currentMarkdown = '';
+// YAML frontmatter 不是 CommonMark，解析器会把它拆成分隔线+标题；解析前剥离、
+// 内容回传时原样接回，用户文件里的头部就不会被改写。
+let currentFrontmatter = '';
+// 原文是未编辑时的唯一输出：序列化器会把 marker/空白规范化，没编辑过就不该让它们落盘。
+let sourceMarkdownBody = '';
+let documentEdited = false;
+let currentBaseDirectory = '';
+// NOTE: currentReadOnly is only true for offscreen screenshot-rendering instances
+// (see file_actions.dart _shareAsImageDirectly). Users never see a read-only UI.
+// The main editor always uses readOnly=false. Do NOT file UX bugs about "read-only mode".
+let currentReadOnly = true;
+let isApplyingFromFlutter = false;
+let initializingEditor = false;
+let initializingEditorTimer = null;
+let editorUserInputListenerAttached = false;
+let createEditorPromise = null;
+let contextMenuElement = null;
+let tableFloatingButtonElement = null;
+let tableFloatingPanelElement = null;
+// 最近一次按下用的是手指还是鼠标：长按要走 WebView 原生选字菜单，
+// 右键才用自绘菜单，contextmenu 事件本身分不出来源。
+let lastPointerType = 'mouse';
+const pendingUploadResolvers = new Map();
+const cmdFailureAggregate = new Map();
+const MAX_UPLOAD_FILES = 6;
+const MAX_UPLOAD_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_UPLOAD_TOTAL_BYTES = 20 * 1024 * 1024;
+
+// Code block theme state
+// Theme IDs: auto, oneDark, oneLight, githubDark, githubLight, nord, material
+let currentCodeBlockTheme = 'auto';
+let currentThemeMode = 'light';
+
+// CodeMirror theme mapping
+const CODE_BLOCK_THEMES = {
+  oneDark: oneDark,
+  githubDark: githubDark,
+  githubLight: githubLight,
+  nord: nordTheme,
+  material: material,
+};
+
+// Get the effective CodeMirror theme based on current settings
+const getEffectiveCodeBlockTheme = () => {
+  const themeId = currentCodeBlockTheme;
+  if (themeId === 'auto') {
+    // Follow app theme mode
+    return currentThemeMode === 'dark' ? CODE_BLOCK_THEMES.oneDark : null;
+  }
+  if (themeId === 'oneLight') {
+    // oneLight is not available as a separate package, use default (null) for light
+    return null;
+  }
+  return CODE_BLOCK_THEMES[themeId] || null;
+};
+// Adaptive debounce: larger files get longer debounce to reduce save frequency
+// Small (< 10KB): 80ms, Medium (10-50KB): 150ms, Large (> 50KB): 300ms
+const calculateAdaptiveDebounceMs = (markdownLength) => {
+  if (markdownLength < 10000) return 80;
+  if (markdownLength < 50000) return 150;
+  return 300;
+};
+let contentChangeTimerId = null;
+let pendingContentMarkdown = null;
+let pendingContentMode = 'full';
+let uploadFailureCount = 0;
+let uploadFailureWindowStart = Date.now();
+let searchHighlightRanges = [];
+let searchHighlightActiveIndex = -1;
+const searchHighlightPluginKey = new PluginKey('USHIO_SEARCH_HIGHLIGHT');
+let progressiveRenderTimerId = null;
+let progressiveRenderCancelled = false;
+let progressiveRenderPending = false;
+let progressiveFirstPaintEmitted = false;
+let PROGRESSIVE_RENDER_THRESHOLD_CHARS = 512 * 1024;
+// 渐进渲染默认改成「追加式」：旧实现每步 replaceAll(整个前缀)，等于把已建好的
+// 树反复推倒，500K 字符要重刷 5+ 次、累计解析量约为全文两倍（见基线 §5.5）。
+// 判据（tools/append-oracle.html）当前结论：代码/列表密集文档要么切不出安全点，
+// 要么分片产物与整篇解析不一致；且在能切的场景里并不更快（89K 代码文档
+// 追加 24869ms vs 整篇 13932ms）。因此默认关闭，等 Phase 3 把视图更新成本降下来后再评估。
+let appendRenderEnabled = false;
+const APPEND_MIN_CHUNK_CHARS = 24 * 1024;
+const searchHighlightProsePlugin = $prose(() => {
+  return new Plugin({
+    key: searchHighlightPluginKey,
+    state: {
+      init: () => DecorationSet.empty,
+      apply: (transaction, decorationSet) => {
+        const meta = transaction.getMeta(searchHighlightPluginKey);
+        if (meta) return meta;
+        return decorationSet.map(transaction.mapping, transaction.doc);
+      },
+    },
+    props: {
+      decorations: (state) =>
+        searchHighlightPluginKey.getState(state) || DecorationSet.empty,
+    },
+  });
+});
+
+let caretViewportSyncRafId = null;
+let suppressNextCaretViewportSync = false;
+let checkboxInteractionGuardUntil = 0;
+let editorTouchScrollSuppressUntil = 0;
+let viewportScrollSuppressUntil = 0;
+let lastKeyboardInsetPx = 0;
+let lastUserScrollAt = 0;
+// 我们自己 scrollTo 引发的那次 scroll 事件不能算成「用户在滚动」，
+// 否则光标避让每滚一次就把下一次抑制掉，连续输入时光标一路沉到键盘底下。
+let lastProgrammaticScrollAt = 0;
+let lastEditorInteractionAt = 0;
+// Flutter 推来的遮挡数据：软键盘高度，以及压在 WebView 上面的工具栏和头部。
+// adjustNothing 下 WebView 尺寸恒定、visualViewport 也报不出软键盘，光标可用区
+// 只能靠这三个数算，自己估出来的那份会把键盘以下也算成看得见。
+let flutterKeyboardInsetPx = 0;
+let flutterToolbarHeightPx = 0;
+let flutterHeaderHeightPx = 0;
+let editorTouchTracking = null;
+// IME composition state - prevent viewport sync during composition
+let isComposing = false;
+// 缓存 --milkdown-font-size 的计算值，主题更新时置空失效。
+// 避免每次光标同步都 getComputedStyle 触发强制样式重算。
+let cachedFontSizePx = null;
+// NOTE: Custom code language popup has been removed. Users change code language
+// by clicking the language label in the code block toolbar and typing directly.
+let codeLanguageUiDebugSeq = 0;
+const codeLanguageDisplayCache = new Map();
+// 在 common(36 种)基础上补充注册常见但不在 common 的语言。每个语法会自行注册
+// 其依赖(如 dart→clike、tsx→jsx/typescript)，register 幂等，顺序无关。
+// 未收录的语言只是降级为无高亮纯文本，不会报错。
+[
+  refractorDart, refractorTsx, refractorJsx, refractorToml, refractorGraphql,
+  refractorGroovy, refractorScala, refractorPowershell, refractorBatch,
+  refractorProtobuf, refractorCmake, refractorNginx, refractorHaskell,
+  refractorElixir, refractorErlang, refractorClojure, refractorJulia,
+  refractorSolidity, refractorApex, refractorFortran, refractorNasm,
+  refractorMermaid, refractorPlantUml,
+].forEach((grammar) => {
+  try { refractor.register(grammar); } catch (_) { /* 单个语言失败不影响其余 */ }
+});
+const highlightParser = createRefractorParser(refractor);
+// Register 'html-block' as an alias of 'html' for prosemirror-highlight
+// This prevents "Unknown language: html-block" errors
+try {
+  if (refractor.languages.html) {
+    refractor.languages['html-block'] = refractor.languages.html;
+  }
+} catch (_) { /* ignore */ }
+const KNOWN_CODE_LANGUAGES = Object.keys(refractor.languages)
+  .filter((name) => typeof name === 'string' && /^[a-z0-9_+-]+$/i.test(name))
+  .sort((a, b) => a.localeCompare(b));
+const RUNTIME_BUILD_TAG = 'lang-inline-v2-20260324-2114';
+window.__USHIO_RUNTIME_TAG = RUNTIME_BUILD_TAG;
+const KNOWN_CODE_LANGUAGE_MAP = new Map(
+  KNOWN_CODE_LANGUAGES.map((name) => [name.trim().toLowerCase(), name]),
+);
+setKnownCodeLanguages(KNOWN_CODE_LANGUAGES);
+
+const nextRequestId = () => `${Date.now()}-${++bridgeSeq}`;
+
+const postToFlutter = (msg) => {
+  if (!window.flutter_inappwebview?.callHandler) {
+    return;
+  }
+  window.flutter_inappwebview.callHandler('bridge', msg).catch((err) => {
+    console.warn('bridge call failed', err);
+  });
+};
+
+const emit = (type, payload = {}) => {
+  postToFlutter({
+    v: 1,
+    source: 'web',
+    target: 'flutter',
+    type,
+    requestId: nextRequestId(),
+    ts: Date.now(),
+    payload,
+  });
+};
+
+const emitDebug = (message) => {
+  emit('on_debug_log', { message });
+};
+
+const recordUploadFailure = (reason) => {
+  const now = Date.now();
+  if (now - uploadFailureWindowStart > 10 * 60 * 1000) {
+    uploadFailureWindowStart = now;
+    uploadFailureCount = 0;
+  }
+  uploadFailureCount += 1;
+  emit('on_cmd_failure_aggregate', {
+    cmd: 'upload_images',
+    reason: reason || 'unknown',
+    count: uploadFailureCount,
+  });
+};
+
+const cssVarMap = {
+  primary: '--milkdown-color-primary',
+  onPrimary: '--milkdown-color-on-primary',
+  secondary: '--milkdown-color-secondary',
+  onSecondary: '--milkdown-color-on-secondary',
+  surface: '--milkdown-color-surface',
+  onSurface: '--milkdown-color-on-surface',
+  background: '--milkdown-color-background',
+  onBackground: '--milkdown-color-on-background',
+  error: '--milkdown-color-error',
+  onError: '--milkdown-color-on-error',
+  outline: '--milkdown-color-outline',
+  shadow: '--milkdown-color-shadow',
+};
+
+const applyTheme = (payload) => {
+  if (!payload || typeof payload !== 'object') return;
+  const root = document.documentElement;
+
+  // Apply colors
+  if (payload.colors && typeof payload.colors === 'object') {
+    Object.entries(payload.colors).forEach(([k, v]) => {
+      const cssVar = cssVarMap[k];
+      if (!cssVar || typeof v !== 'string') return;
+      root.style.setProperty(cssVar, v);
+    });
+  }
+
+  // Apply font settings
+  const font = payload.font;
+  if (font && typeof font === 'object') {
+    if (typeof font.body === 'string') {
+      root.style.setProperty('--milkdown-font-body', font.body);
+    }
+    if (typeof font.mono === 'string') {
+      root.style.setProperty('--milkdown-font-mono', font.mono);
+    }
+    if (typeof font.sizePx === 'number') {
+      root.style.setProperty('--milkdown-font-size', `${font.sizePx}px`);
+      cachedFontSizePx = null;
+    }
+    if (typeof font.lineHeight === 'number') {
+      root.style.setProperty('--milkdown-line-height', `${font.lineHeight}`);
+    }
+  }
+
+  // Apply style settings (new)
+  const style = payload.style;
+  if (style && typeof style === 'object') {
+    if (typeof style.borderRadius === 'number') {
+      root.style.setProperty('--milkdown-border-radius', `${style.borderRadius}px`);
+    }
+    if (typeof style.shadowOpacity === 'number') {
+      root.style.setProperty('--milkdown-shadow-opacity', style.shadowOpacity);
+    }
+  }
+
+  // Apply theme mode
+  if (payload.mode === 'light' || payload.mode === 'dark') {
+    currentThemeMode = payload.mode;
+    root.setAttribute('data-theme-mode', payload.mode);
+  }
+
+  // Apply code block theme
+  if (typeof payload.codeBlockTheme === 'string') {
+    const previousTheme = currentCodeBlockTheme;
+    currentCodeBlockTheme = payload.codeBlockTheme;
+    // If theme changed and editor exists, we need to rebuild with new theme
+    if (previousTheme !== currentCodeBlockTheme && editorInstance) {
+      // Note: Changing CodeMirror theme requires recreating the editor
+      // For now, we store the preference and it will be applied on next editor creation
+      // A full implementation would require dynamic theme switching support in Crepe
+      emitDebug(`[THEME] Code block theme changed: ${previousTheme} -> ${currentCodeBlockTheme}`);
+    }
+  }
+};
+
+const updateViewportMetrics = () => {
+  const root = document.documentElement;
+  const vv = window.visualViewport;
+  if (!vv) {
+    root.style.setProperty('--ushio-viewport-height', `${window.innerHeight}px`);
+    root.style.setProperty('--ushio-keyboard-inset', `${flutterKeyboardInsetPx}px`);
+    root.style.setProperty('--ushio-header-height', `${flutterHeaderHeightPx}px`);
+    lastKeyboardInsetPx = flutterKeyboardInsetPx;
+    return;
+  }
+  const viewportHeight = Math.max(0, vv.height);
+  const keyboardInset = Math.max(
+    0,
+    window.innerHeight - (vv.height + vv.offsetTop),
+    flutterKeyboardInsetPx,
+  );
+  root.style.setProperty('--ushio-viewport-height', `${viewportHeight}px`);
+  root.style.setProperty('--ushio-keyboard-inset', `${keyboardInset}px`);
+  root.style.setProperty('--ushio-header-height', `${flutterHeaderHeightPx}px`);
+  const keyboardInsetIncreased = keyboardInset > lastKeyboardInsetPx + 2;
+  lastKeyboardInsetPx = keyboardInset;
+  if (keyboardInset > 0 && keyboardInsetIncreased) {
+    // 键盘弹出时，强制执行滚动（不受抑制机制影响）
+    forceCaretIntoUpperViewport();
+  }
+};
+
+const scrollNodeToViewport = (node, topOffset = 32) => {
+  if (!(node instanceof Element)) return false;
+  const vv = window.visualViewport;
+  const viewportHeight = Math.max(1, vv?.height ?? window.innerHeight);
+  const offset = Number.isFinite(topOffset) ? Math.max(0, topOffset) : 32;
+  const targetTop = Math.max(24, viewportHeight * 0.28 - offset);
+  const rect = node.getBoundingClientRect();
+  const deltaY = rect.top - targetTop;
+  const scroller = document.scrollingElement || document.documentElement || document.body;
+  if (scroller && typeof scroller.scrollTo === 'function') {
+    const currentTop = scroller.scrollTop ?? window.pageYOffset ?? 0;
+    scroller.scrollTo({ top: Math.max(0, currentTop + deltaY), behavior: 'auto' });
+  } else {
+    window.scrollBy(0, deltaY);
+  }
+  node.classList.add('heading-flash');
+  setTimeout(() => node.classList.remove('heading-flash'), 700);
+  return true;
+};
+
+const getMilkdownFontSize = () => {
+  if (cachedFontSizePx == null) {
+    cachedFontSizePx =
+      parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue('--milkdown-font-size'),
+      ) || 16;
+  }
+  return cachedFontSizePx;
+};
+
+const ensureCaretInUpperViewport = ({ allowDuringComposition = false } = {}) => {
+  if (currentReadOnly) return;
+  // Skip viewport sync during IME composition to prevent janky animations
+  if (!allowDuringComposition && isComposing) return;
+  if (Date.now() < editorTouchScrollSuppressUntil || Date.now() < viewportScrollSuppressUntil) return;
+  if (Date.now() - lastEditorInteractionAt > 1200) return;
+  const active = document.activeElement instanceof Element ? document.activeElement : null;
+  if (!active?.closest('.ProseMirror')) return;
+
+  const selection = window.getSelection();
+  const anchorNode = selection?.anchorNode ?? null;
+  const anchorElement = anchorNode instanceof Element ? anchorNode : anchorNode?.parentElement;
+  if (anchorElement?.closest('.milkdown-image-block')) return;
+
+  let caretTop = null;
+  let caretBottom = null;
+  let selectionIsImage = false;
+  editorInstance?.action((ctx) => {
+    const view = ctx.get(editorViewCtx);
+    const { state } = view;
+    const selectedNodeName = state.selection?.node?.type?.name;
+    selectionIsImage = selectedNodeName === 'image';
+    if (selectionIsImage) return;
+    const pos = state.selection?.$from?.pos;
+    if (!Number.isFinite(pos)) return;
+    try {
+      const coords = view.coordsAtPos(pos);
+      if (coords && Number.isFinite(coords.top)) {
+        caretTop = coords.top;
+        caretBottom = coords.bottom;
+      }
+    } catch (_) {
+      caretTop = null;
+    }
+  });
+  if (selectionIsImage) return;
+
+  const vv = window.visualViewport;
+  const viewportHeight = Math.max(1, vv?.height ?? window.innerHeight);
+  const fallbackRectTop = anchorElement?.getBoundingClientRect?.().top;
+  const currentTop = Number.isFinite(caretTop) ? caretTop : fallbackRectTop;
+  if (!Number.isFinite(currentTop)) return;
+
+  const fontSize = getMilkdownFontSize();
+  const lineHeight = fontSize * 1.5; // 与Flutter端保持一致
+
+  const layoutHeight = window.innerHeight || viewportHeight;
+  const keyboardInset = getKeyboardInset();
+  // 键盘只能扣一次：浏览器自己缩了视口的场合（iOS、桌面软键盘）vv.height 已经
+  // 不含键盘，adjustNothing 下的 Android 则仍是整窗高度，得由我们自己扣。
+  const viewportExcludesKeyboard = layoutHeight - viewportHeight >= keyboardInset - 1;
+  const visibleHeight = viewportExcludesKeyboard ? viewportHeight : layoutHeight - keyboardInset;
+
+  // 工具栏和头部是 Flutter 画在 WebView 之上的覆盖层，只有推过来的数可信
+  const toolbarHeight = flutterToolbarHeightPx > 0 ? flutterToolbarHeightPx : 56;
+  const headerHeight = flutterHeaderHeightPx > 0 ? flutterHeaderHeightPx : 0;
+
+  // 光标要落在的区间：头部以下、工具栏与键盘以上。
+  const caretMargin = lineHeight * 0.5;
+  const usableTop = headerHeight + caretMargin;
+
+  const scroller = document.scrollingElement || document.documentElement || document.body;
+  const scrollTop = scroller.scrollTop ?? window.pageYOffset ?? 0;
+
+  // 要清出去的是「光标那一行的下沿」，不是插入点顶端：只把顶端卡在一行之外时，
+  // 行盒下沿正好贴在工具栏玻璃上，看着就是被压住。coordsAtPos 的 bottom 实测与
+  // 行高一致（顶端 442 → 下沿 465），拿不到时退回顶端加一行。
+  const caretLineBottom = Number.isFinite(caretBottom)
+    ? caretBottom
+    : currentTop + lineHeight;
+  const lineBottomLimit = visibleHeight - toolbarHeight - caretMargin;
+
+  // 只补到刚好回到区间内：多退少退都会让下一次输入又判定成越界，来回拉扯
+  let delta = 0;
+  if (caretLineBottom > lineBottomLimit) {
+    delta = caretLineBottom - lineBottomLimit;
+  } else if (currentTop < usableTop) {
+    delta = currentTop - usableTop;
+  }
+
+  if (Math.abs(delta) >= 4) {
+    const maxScroll = Math.max(0, (scroller.scrollHeight || 0) - layoutHeight);
+    const targetScrollTop = Math.max(0, Math.min(scrollTop + delta, maxScroll));
+    if (scroller && typeof scroller.scrollTo === 'function') {
+      lastProgrammaticScrollAt = Date.now();
+      scroller.scrollTo({ top: targetScrollTop, behavior: 'auto' });
+    } else {
+      lastProgrammaticScrollAt = Date.now();
+      window.scrollBy(0, targetScrollTop - scrollTop);
+    }
+  }
+};
+
+const scheduleCaretIntoUpperViewport = () => {
+  // Skip during IME composition
+  if (isComposing) return;
+  if (Date.now() < checkboxInteractionGuardUntil) return;
+  if (Date.now() < editorTouchScrollSuppressUntil) return;
+  if (Date.now() < viewportScrollSuppressUntil) return;
+  if (Date.now() - lastUserScrollAt < 600) return;
+  if (Date.now() - lastEditorInteractionAt > 1200) return;
+  if (caretViewportSyncRafId != null) return;
+  caretViewportSyncRafId = requestAnimationFrame(() => {
+    caretViewportSyncRafId = null;
+    const c0 = perfNow();
+    ensureCaretInUpperViewport();
+    perfNoteCaret(perfNow() - c0);
+  });
+};
+
+// 强制执行光标滚动（绕过抑制机制），用于键盘弹出时
+// 用 rAF 合并：键盘弹出瞬间 Flutter bridge(scroll_caret_into_view) 与
+// visualViewport resize 可能在同一帧各触发一次，合并后只做一次 reflow+scrollTo。
+let forceCaretRafId = null;
+const forceCaretIntoUpperViewport = () => {
+  // 重置抑制状态，允许滚动
+  editorTouchScrollSuppressUntil = 0;
+  viewportScrollSuppressUntil = 0;
+  lastUserScrollAt = 0;
+  if (forceCaretRafId != null) return;
+  forceCaretRafId = requestAnimationFrame(() => {
+    forceCaretRafId = null;
+    const c0 = perfNow();
+    ensureCaretInUpperViewport({ allowDuringComposition: true });
+    perfNoteCaret(perfNow() - c0);
+  });
+};
+
+const suppressCaretViewportSync = (durationMs = 900) => {
+  const until = Date.now() + Math.max(0, durationMs);
+  editorTouchScrollSuppressUntil = Math.max(editorTouchScrollSuppressUntil, until);
+  viewportScrollSuppressUntil = Math.max(viewportScrollSuppressUntil, until);
+};
+
+const guardEditorFocusAfterCheckboxToggle = () => {
+  checkboxInteractionGuardUntil = Date.now() + 420;
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  blurEditorFocus();
+};
+
+const ensureFileBaseUrl = (baseDirectory) => {
+  if (typeof baseDirectory !== 'string' || !baseDirectory.trim()) return null;
+  if (baseDirectory.startsWith('file://')) {
+    return baseDirectory.endsWith('/') ? baseDirectory : `${baseDirectory}/`;
+  }
+  const normalized = baseDirectory.replace(/\\/g, '/');
+  const withLeading = normalized.startsWith('/') ? normalized : `/${normalized}`;
+  return `file://${withLeading.endsWith('/') ? withLeading : `${withLeading}/`}`;
+};
+
+const applyHorizontalScrollClass = (element) => {
+  if (!(element instanceof Element)) return;
+  element.classList.add('ushio-horizontal-scroll');
+};
+
+const guessPathColumnIndexes = (table) => {
+  if (!(table instanceof HTMLTableElement)) return new Set();
+  const firstRow = table.querySelector('tr');
+  if (!(firstRow instanceof HTMLTableRowElement)) return new Set();
+  const cells = Array.from(firstRow.querySelectorAll('th,td'));
+  const indexes = new Set();
+  cells.forEach((cell, index) => {
+    const title = (cell.textContent || '').trim().toLowerCase();
+    if (!title) return;
+    if (
+      title.includes('path')
+      || title.includes('file path')
+      || title.includes('filepath')
+      || title.includes('文件路径')
+      || title.includes('路径')
+    ) {
+      indexes.add(index);
+    }
+  });
+  return indexes;
+};
+
+const markTablePathColumns = (table) => {
+  if (!(table instanceof HTMLTableElement)) return;
+  const pathColumns = guessPathColumnIndexes(table);
+  if (!pathColumns.size) return;
+  table.querySelectorAll('tr').forEach((row) => {
+    const cells = Array.from(row.querySelectorAll('th,td'));
+    cells.forEach((cell, index) => {
+      if (pathColumns.has(index)) {
+        cell.classList.add('ushio-path-column');
+      } else {
+        cell.classList.remove('ushio-path-column');
+      }
+    });
+  });
+};
+
+const lockViewportZoom = () => {
+  const meta = document.querySelector('meta[name="viewport"]');
+  if (meta) {
+    meta.setAttribute('content', 'width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no');
+  }
+  let lastTouchEndAt = 0;
+  document.addEventListener('touchmove', (event) => {
+    if (event.touches.length > 1) {
+      event.preventDefault();
+    }
+  }, { passive: false });
+  document.addEventListener('touchend', (event) => {
+    const now = Date.now();
+    if (now - lastTouchEndAt <= 280) {
+      event.preventDefault();
+    }
+    lastTouchEndAt = now;
+  }, { passive: false });
+  window.addEventListener('gesturestart', (event) => event.preventDefault(), { passive: false });
+  window.addEventListener('gesturechange', (event) => event.preventDefault(), { passive: false });
+  window.addEventListener('gestureend', (event) => event.preventDefault(), { passive: false });
+  window.addEventListener('wheel', (event) => {
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+    }
+  }, { passive: false });
+};
+
+const applyReadOnlyState = () => {
+  if (currentReadOnly) {
+    app.setAttribute('data-ushio-read-only', 'true');
+  } else {
+    app.removeAttribute('data-ushio-read-only');
+  }
+};
+
+const attachHorizontalWheelScroll = () => {
+  const candidates = app.querySelectorAll('.milkdown-table-block, .ProseMirror pre');
+  candidates.forEach((container) => {
+    if (!(container instanceof HTMLElement) || container.dataset.ushioWheelBound === '1') return;
+    container.dataset.ushioWheelBound = '1';
+    container.addEventListener('wheel', (event) => {
+      const deltaX = Math.abs(event.deltaX);
+      const deltaY = Math.abs(event.deltaY);
+      if (deltaY <= deltaX) return;
+      const canScrollX = container.scrollWidth > container.clientWidth + 1;
+      if (!canScrollX) return;
+      const next = container.scrollLeft + event.deltaY;
+      const before = container.scrollLeft;
+      container.scrollLeft = next;
+      if (container.scrollLeft !== before) {
+        event.preventDefault();
+      }
+    }, { passive: false });
+  });
+};
+
+const isExternalHref = (href) => {
+  if (typeof href !== 'string') return false;
+  return /^(https?:|mailto:|tel:|content:|data:)/i.test(href);
+};
+
+const resolveHref = (href) => {
+  if (typeof href !== 'string' || !href) return '';
+  if (href.startsWith('#') || isExternalHref(href) || href.startsWith('file://')) {
+    return href;
+  }
+  if (href.startsWith('/')) {
+    return `file://${href}`;
+  }
+  const baseUrl = ensureFileBaseUrl(currentBaseDirectory);
+  if (!baseUrl) return href;
+  try {
+    return new URL(href, baseUrl).toString();
+  } catch (_) {
+    return href;
+  }
+};
+
+const resolveInsertImageSrc = (src) => {
+  if (typeof src !== 'string') return '';
+  const trimmed = src.trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('file://') || isExternalHref(trimmed)) return trimmed;
+  if (trimmed.startsWith('/')) return `file://${trimmed}`;
+  const baseUrl = ensureFileBaseUrl(currentBaseDirectory);
+  if (!baseUrl) return trimmed;
+  try {
+    return new URL(trimmed, baseUrl).toString();
+  } catch (_) {
+    return trimmed;
+  }
+};
+
+const sanitizeImageSource = (src) => {
+  if (typeof src !== 'string') return '';
+  const trimmed = src.trim();
+  if (!trimmed) return '';
+  const markdownTitleMatch = trimmed.match(/^(\S+)\s+["'“”][\s\S]*["'“”]$/);
+  if (markdownTitleMatch && markdownTitleMatch[1]) {
+    return markdownTitleMatch[1].trim();
+  }
+  const firstSpace = trimmed.indexOf(' ');
+  if (firstSpace > 0) {
+    const suffix = trimmed.slice(firstSpace + 1).trim();
+    if (suffix.startsWith('"') || suffix.startsWith("'") || suffix.startsWith('“')) {
+      return trimmed.slice(0, firstSpace).trim();
+    }
+  }
+  return trimmed;
+};
+
+const resolveImageSrc = (src) => {
+  const sanitized = sanitizeImageSource(src);
+  if (!sanitized) return '';
+  if (sanitized.startsWith(`${LOCAL_FILE_SCHEME}://`)) {
+    return sanitized;
+  }
+  if (isExternalHref(sanitized) || sanitized.startsWith('data:') || sanitized.startsWith('blob:')) {
+    return sanitized;
+  }
+  const absolutePath = toAbsoluteLocalPath(sanitized, currentBaseDirectory);
+  if (!absolutePath) {
+    return resolveHref(sanitized);
+  }
+  const proxyUrl = buildLocalFileProxyUrl(absolutePath);
+  return proxyUrl || resolveHref(sanitized);
+};
+
+const BLOCK_HTML_TAGS = new Set([
+  'article',
+  'aside',
+  'blockquote',
+  'div',
+  'dl',
+  'fieldset',
+  'figcaption',
+  'figure',
+  'footer',
+  'form',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'header',
+  'hr',
+  'li',
+  'main',
+  'nav',
+  'ol',
+  'p',
+  'pre',
+  'section',
+  'table',
+  'tbody',
+  'td',
+  'tfoot',
+  'th',
+  'thead',
+  'tr',
+  'ul',
+]);
+
+const DANGEROUS_HTML_TAGS = new Set([
+  'script',
+  'style',
+  'iframe',
+  'object',
+  'embed',
+  'meta',
+  'link',
+  'base',
+]);
+
+const sanitizeHtmlAttributeValue = (name, value) => {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  const lower = trimmed.toLowerCase();
+  if (name === 'href' || name === 'src' || name === 'xlink:href') {
+    if (lower.startsWith('javascript:')) return '';
+  }
+  return trimmed;
+};
+
+const sanitizeHtmlFragment = (fragment) => {
+  const walk = (node) => {
+    if (!(node instanceof Element)) return;
+    const tag = (node.tagName || '').toLowerCase();
+    if (DANGEROUS_HTML_TAGS.has(tag)) {
+      node.remove();
+      return;
+    }
+    Array.from(node.attributes || []).forEach((attr) => {
+      const attrName = (attr.name || '').toLowerCase();
+      if (!attrName) return;
+      if (attrName.startsWith('on')) {
+        node.removeAttribute(attr.name);
+        return;
+      }
+      const sanitizedValue = sanitizeHtmlAttributeValue(attrName, attr.value);
+      if (!sanitizedValue) {
+        node.removeAttribute(attr.name);
+      } else if (sanitizedValue !== attr.value) {
+        node.setAttribute(attr.name, sanitizedValue);
+      }
+    });
+    Array.from(node.children || []).forEach((child) => walk(child));
+  };
+  Array.from(fragment.children || []).forEach((child) => walk(child));
+};
+
+const renderRawHtmlNodes = (root) => {
+  root.querySelectorAll('span[data-type="html"]').forEach((htmlNode) => {
+    if (!(htmlNode instanceof HTMLElement)) return;
+    const rawValue = htmlNode.dataset.value || '';
+    if (!rawValue.trim()) {
+      htmlNode.textContent = '';
+      htmlNode.classList.remove('ushio-html-block');
+      htmlNode.classList.add('ushio-html-inline');
+      htmlNode.dataset.ushioHtmlRenderedValue = '';
+      return;
+    }
+    if (htmlNode.dataset.ushioHtmlRenderedValue === rawValue) return;
+
+    const template = document.createElement('template');
+    template.innerHTML = rawValue;
+    sanitizeHtmlFragment(template.content);
+
+    htmlNode.textContent = '';
+    htmlNode.append(template.content.cloneNode(true));
+    const hasBlockChild = Array.from(htmlNode.children || []).some((child) => (
+      child instanceof HTMLElement && BLOCK_HTML_TAGS.has((child.tagName || '').toLowerCase())
+    ));
+    htmlNode.classList.toggle('ushio-html-block', hasBlockChild);
+    htmlNode.classList.toggle('ushio-html-inline', !hasBlockChild);
+    htmlNode.dataset.ushioHtmlRenderedValue = rawValue;
+  });
+};
+
+/**
+ * CSS injection + overlay approach for rendering HTML blocks.
+ * ProseMirror detects DOM mutations and re-renders, wiping inline styles
+ * and inserted siblings. To avoid this:
+ * 1. A persistent CSS <style> rule hides html-block code blocks (survives re-renders)
+ * 2. Rendered HTML is placed in an overlay OUTSIDE ProseMirror's DOM tree
+ * 3. Overlay items are positioned absolutely over the hidden code blocks
+ */
+let htmlBlockHideStyleInjected = false;
+let htmlOverlayContainer = null;
+const htmlOverlayContentCache = new Map(); // blockIndex -> contentHash
+// ProseMirror 会在收尾之后异步重渲染节点，把占位高连同其它内联样式一起抹掉；
+// 观察者重建隐藏样式时按内容哈希把高度补回去，否则占位高退回源码 <pre> 的自然高度，
+// 渲染内容较矮的 HTML 块下方就多出一截空白。按内容而不是序号记，块被重排也不会错配。
+const htmlBlockPlaceholderHeights = new Map(); // contentHash -> px
+
+const getHtmlBlockLanguage = (block) => {
+  if (!(block instanceof HTMLElement)) return '';
+  const candidates = [
+    block.querySelector('.tools .language-button')?.dataset?.language,
+    block.querySelector('.tools .language-button')?.textContent,
+    block.querySelector('.tools [data-language]')?.dataset?.language,
+    block.querySelector('pre')?.getAttribute('data-language'),
+    block.querySelector('code')?.getAttribute('data-language'),
+  ];
+  return candidates
+    .map((value) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
+    .find((value) => value) || '';
+};
+
+const isHtmlBlockCodeNode = (block) => getHtmlBlockLanguage(block) === 'html-block';
+
+const setImportantStyleIfNeeded = (element, property, value) => {
+  if (!(element instanceof HTMLElement)) return;
+  if (
+    element.style.getPropertyValue(property) === value
+    && element.style.getPropertyPriority(property) === 'important'
+  ) {
+    return;
+  }
+  element.style.setProperty(property, value, 'important');
+};
+
+const injectHtmlBlockHideStyle = () => {
+  if (htmlBlockHideStyleInjected) return;
+  const style = document.createElement('style');
+  style.id = 'ushio-html-block-hide';
+  // Keep raw html-block code nodes invisible while preserving layout space for
+  // the rendered overlay. Attribute and :has() selectors survive NodeView churn
+  // better than relying on a single class.
+  style.textContent = `
+    .milkdown .milkdown-code-block[data-ushio-html-block="1"],
+    .milkdown .milkdown-code-block.ushio-html-block-target,
+    .milkdown .milkdown-code-block:has(pre[data-language="html-block"]),
+    .milkdown .milkdown-code-block:has(code[data-language="html-block"]),
+    .milkdown .milkdown-code-block:has(.tools [data-language="html-block"]) {
+      visibility: hidden !important;
+      overflow: hidden !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+  `;
+  document.head.appendChild(style);
+  htmlBlockHideStyleInjected = true;
+};
+
+const ensureHtmlOverlay = () => {
+  const milkdownEl = app.querySelector('.milkdown');
+  if (!milkdownEl) return null;
+  // .milkdown 会在切档时被重建。旧实现只判 parentNode，缓存的容器仍挂在
+  // 已脱离文档的旧 .milkdown 上，于是第二次打开带 HTML 块的文档时，overlay 项
+  // 全被写进游离子树——用户看到的是那块位置一片空白。必须按「是否还在文档里、
+  // 且父级是不是当前这个 .milkdown」来判定，并把同一个容器重新收养过去。
+  if (htmlOverlayContainer && htmlOverlayContainer.isConnected
+    && htmlOverlayContainer.parentNode === milkdownEl) return htmlOverlayContainer;
+  // Make .milkdown a positioning context
+  milkdownEl.style.position = 'relative';
+  if (!htmlOverlayContainer) {
+    // Create overlay as a CHILD of .milkdown but OUTSIDE .ProseMirror
+    htmlOverlayContainer = document.createElement('div');
+    htmlOverlayContainer.id = 'ushio-html-overlay';
+    htmlOverlayContainer.style.cssText = 'position:absolute;top:0;left:0;width:100%;pointer-events:none;z-index:10;';
+  }
+  milkdownEl.appendChild(htmlOverlayContainer);
+  return htmlOverlayContainer;
+};
+
+const getHtmlBlockRawText = (block) => {
+  const cmLines = block.querySelectorAll('.cm-line');
+  if (cmLines.length > 0) {
+    return Array.from(cmLines).map((line) => line.textContent || '').join('\n');
+  }
+  return block.querySelector(`pre[data-language="${HTML_BLOCK_LANGUAGE}"]`)?.textContent
+    || block.querySelector('.cm-content')?.textContent
+    || '';
+};
+
+const htmlBlockSourceKey = (rawHtml) => rawHtml.length + ':' + rawHtml.substring(0, 200);
+
+/**
+ * Hide a .milkdown-code-block element that contains html-block content.
+ * Uses inline !important styles to override any CSS that ProseMirror may reset.
+ * The max-height is set to a large value initially; it will be corrected by
+ * renderHtmlBlockCodeNodes once the overlay height is known.
+ */
+const hideHtmlBlockCodeNode = (block) => {
+  if (!(block instanceof HTMLElement)) return;
+  if (!isHtmlBlockCodeNode(block)) return;
+  if (block.dataset.ushioHtmlBlockHidden !== '1') {
+    block.dataset.ushioHtmlBlockHidden = '1';
+  }
+  if (block.dataset.ushioHtmlBlock !== '1') {
+    block.dataset.ushioHtmlBlock = '1';
+  }
+  if (!block.classList.contains('ushio-html-block-target')) {
+    block.classList.add('ushio-html-block-target');
+  }
+  setImportantStyleIfNeeded(block, 'visibility', 'hidden');
+  setImportantStyleIfNeeded(block, 'overflow', 'hidden');
+  setImportantStyleIfNeeded(block, 'opacity', '0');
+  setImportantStyleIfNeeded(block, 'pointer-events', 'none');
+  const height = htmlBlockPlaceholderHeights.get(htmlBlockSourceKey(getHtmlBlockRawText(block)));
+  if (height > 0) {
+    setImportantStyleIfNeeded(block, 'box-sizing', 'border-box');
+    setImportantStyleIfNeeded(block, 'height', `${height}px`);
+    setImportantStyleIfNeeded(block, 'min-height', `${height}px`);
+    setImportantStyleIfNeeded(block, 'max-height', `${height}px`);
+  }
+};
+
+/**
+ * Start a MutationObserver on .milkdown to continuously hide html-block code blocks.
+ * This is needed because ProseMirror re-renders NodeViews, which recreates the
+ * code block wrapper elements and strips previously applied inline styles/classes.
+ *
+ * .milkdown 本身会在切档时被重建，所以观察者不能「建一次就完事」：目标元素换了就必须
+ * 重新 observe，否则隐藏规则只作用在游离子树上，新文档的 HTML 块会露出源码。
+ */
+let htmlBlockObserver = null;
+let htmlBlockObservedEl = null;
+let htmlBlockHideRafId = null;
+
+const hideAllHtmlBlockNodes = () => {
+  const milkdownEl = app.querySelector('.milkdown');
+  if (!milkdownEl) return;
+  milkdownEl.querySelectorAll('.milkdown-code-block').forEach(hideHtmlBlockCodeNode);
+};
+
+const scheduleHtmlBlockHidePass = () => {
+  if (htmlBlockHideRafId != null) return;
+  htmlBlockHideRafId = requestAnimationFrame(() => {
+    htmlBlockHideRafId = null;
+    hideAllHtmlBlockNodes();
+  });
+};
+
+const startHtmlBlockObserver = () => {
+  const milkdownEl = app.querySelector('.milkdown');
+  if (!milkdownEl) return;
+  if (htmlBlockObserver && htmlBlockObservedEl === milkdownEl && milkdownEl.isConnected) return;
+  if (!htmlBlockObserver) {
+    htmlBlockObserver = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === 'attributes') {
+          const targetBlock = mutation.target instanceof HTMLElement
+            ? mutation.target.closest('.milkdown-code-block')
+            : null;
+          hideHtmlBlockCodeNode(targetBlock);
+          scheduleHtmlBlockHidePass();
+          continue;
+        }
+        for (const node of mutation.addedNodes) {
+          if (!(node instanceof HTMLElement)) continue;
+          if (node.classList?.contains('milkdown-code-block')) {
+            hideHtmlBlockCodeNode(node);
+          }
+          node.querySelectorAll?.('.milkdown-code-block').forEach(hideHtmlBlockCodeNode);
+        }
+      }
+    });
+  } else {
+    htmlBlockObserver.disconnect();
+  }
+  htmlBlockObservedEl = milkdownEl;
+  // Initial pass: hide any html-block code blocks already in this container
+  hideAllHtmlBlockNodes();
+  htmlBlockObserver.observe(milkdownEl, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['class', 'style', 'data-language', 'data-ushio-html-block'],
+  });
+};
+
+const renderHtmlBlockCodeNodes = (root) => {
+  injectHtmlBlockHideStyle();
+  const overlay = ensureHtmlOverlay();
+  if (!overlay) return;
+  startHtmlBlockObserver();
+
+  const milkdownEl = root.closest('.milkdown') || app.querySelector('.milkdown');
+  if (!milkdownEl) return;
+
+  /**
+   * 读写分批。旧实现是「读某块矩形 → 写它的占位高 → 读下一块矩形」，每次写都会
+   * 让后续读触发整篇重排：6 个 HTML 块就把 1300 块的文档强制布局十几遍，实测占
+   * 冷路径收尾的 85%（212.5ms / 251.2ms）。改成 读-读-读 → 写-写 → 一次读高 → 写高，
+   * 整轮只触发两次布局。
+   */
+
+  // ---- 1) 只读：几何与内容，中间不写任何东西 ----
+  const milkdownRect = milkdownEl.getBoundingClientRect();
+  const planned = [];
+  let htmlBlockIndex = 0;
+  root.querySelectorAll('.milkdown-code-block').forEach((block) => {
+    if (!(block instanceof HTMLElement)) return;
+    if (!isHtmlBlockCodeNode(block)) return;
+    const idx = htmlBlockIndex;
+    htmlBlockIndex += 1;
+
+    const rawHtml = getHtmlBlockRawText(block);
+    if (!rawHtml.trim()) return;
+
+    const blockRect = block.getBoundingClientRect();
+    planned.push({
+      block,
+      idx,
+      rawHtml,
+      contentHash: htmlBlockSourceKey(rawHtml),
+      top: blockRect.top - milkdownRect.top + milkdownEl.scrollTop,
+      left: blockRect.left - milkdownRect.left + milkdownEl.scrollLeft,
+      width: blockRect.width,
+    });
+  });
+
+  // ---- 2) 只写：建/更新 overlay 项与位置（此处不读高度）----
+  const activeIndices = new Set();
+  for (const item of planned) {
+    activeIndices.add(String(item.idx));
+    let overlayItem = overlay.querySelector(`[data-html-block-index="${item.idx}"]`);
+    const needsUpdate = !overlayItem || htmlOverlayContentCache.get(item.idx) !== item.contentHash;
+    if (needsUpdate) {
+      if (overlayItem) overlayItem.remove();
+      const template = document.createElement('template');
+      template.innerHTML = item.rawHtml;
+      sanitizeHtmlFragment(template.content);
+      overlayItem = document.createElement('div');
+      overlayItem.className = 'ushio-html-block';
+      overlayItem.setAttribute('data-html-block-index', String(item.idx));
+      overlayItem.append(template.content.cloneNode(true));
+      overlay.appendChild(overlayItem);
+      htmlOverlayContentCache.set(item.idx, item.contentHash);
+    }
+    overlayItem.style.position = 'absolute';
+    overlayItem.style.pointerEvents = 'auto';
+    overlayItem.style.top = `${item.top}px`;
+    overlayItem.style.left = `${item.left}px`;
+    overlayItem.style.width = `${item.width}px`;
+    item.overlayItem = overlayItem;
+  }
+
+  // 删掉已不存在的块对应的 overlay 项
+  overlay.querySelectorAll('[data-html-block-index]').forEach((el) => {
+    if (!activeIndices.has(el.getAttribute('data-html-block-index'))) el.remove();
+  });
+  for (const [key] of htmlOverlayContentCache) {
+    if (!activeIndices.has(String(key))) htmlOverlayContentCache.delete(key);
+  }
+
+  // ---- 3) 一次读：所有 overlay 项的渲染高度（整轮第二次布局）----
+  for (const item of planned) item.overlayHeight = item.overlayItem.offsetHeight;
+
+  // ---- 4) 只写：伪块占位高与隐藏标记 ----
+  for (const item of planned) {
+    hideHtmlBlockCodeNode(item.block);
+    // 伪块自身带 padding/border，而 height 默认 content-box：不定 border-box 的话
+    // 实际占位高 = 渲染高 + padding，每个 HTML 块多占一截并按块数累积。
+    item.block.style.setProperty('box-sizing', 'border-box', 'important');
+    if (item.overlayHeight > 0) {
+      htmlBlockPlaceholderHeights.set(item.contentHash, item.overlayHeight);
+      item.block.style.setProperty('height', `${item.overlayHeight}px`, 'important');
+      item.block.style.setProperty('min-height', `${item.overlayHeight}px`, 'important');
+      item.block.style.setProperty('max-height', `${item.overlayHeight}px`, 'important');
+    } else {
+      item.block.style.removeProperty('height');
+      item.block.style.removeProperty('min-height');
+      item.block.style.setProperty('max-height', '0', 'important');
+    }
+    item.block.style.setProperty('overflow', 'hidden', 'important');
+  }
+
+  /**
+   * ---- 5) 再读一次矩形、再写一次位置 ----
+   * 第 1 步读的矩形是「占位高还没写」时的几何；写完占位高后块的位置会变。
+   * 若留到下一次收尾再校正，就变成「两趟才收敛」，每次收尾都可能留一帧错位。
+   * 这里在同一轮内补一次 read→write：布局刷新仍是常数级（3 次而不是 2×块数）。
+   */
+  const milkdownRect2 = milkdownEl.getBoundingClientRect();
+  for (const item of planned) {
+    const r = item.block.getBoundingClientRect();
+    item.top = r.top - milkdownRect2.top + milkdownEl.scrollTop;
+    item.left = r.left - milkdownRect2.left + milkdownEl.scrollLeft;
+    item.width = r.width;
+  }
+  for (const item of planned) {
+    item.overlayItem.style.top = `${item.top}px`;
+    item.overlayItem.style.left = `${item.left}px`;
+    item.overlayItem.style.width = `${item.width}px`;
+  }
+
+  // 高度缓存只服务当前文档里还存在的块，否则连续打开文档会无限累积。
+  const liveKeys = new Set(planned.map((item) => item.contentHash));
+  for (const key of htmlBlockPlaceholderHeights.keys()) {
+    if (!liveKeys.has(key)) htmlBlockPlaceholderHeights.delete(key);
+  }
+};
+
+/**
+ * Post-process DOM to find consecutive block-level HTML spans and render
+ * them as a single HTML block. This handles multi-tag HTML like <table>
+ * which Milkdown splits into individual span[data-type="html"] nodes.
+ */
+const renderBlockHtmlGroups = (root) => {
+  const htmlSpans = root.querySelectorAll('span[data-type="html"]');
+  if (htmlSpans.length === 0) return;
+
+  // First pass: hide orphan block-level close tags (e.g., </table>)
+  // These are leftovers from Milkdown parsing raw HTML and should never be visible
+  htmlSpans.forEach((span) => {
+    if (!(span instanceof HTMLElement)) return;
+    const rawValue = (span.dataset.value || '').trim();
+    if (HTML_BLOCK_CLOSE_TAG_PATTERN.test(rawValue) && !span.dataset.ushioBlockHtmlHidden) {
+      span.style.display = 'none';
+      span.dataset.ushioBlockHtmlHidden = 'orphan-close';
+    }
+  });
+
+  // Group consecutive HTML spans that belong to the same parent paragraph
+  let i = 0;
+  while (i < htmlSpans.length) {
+    const span = htmlSpans[i];
+    if (!(span instanceof HTMLElement)) { i++; continue; }
+    const rawValue = (span.dataset.value || '').trim();
+
+    // Check if this span starts a block-level HTML tag
+    if (!HTML_BLOCK_TAG_PATTERN.test(rawValue) || !rawValue.startsWith('<')) {
+      i++;
+      continue;
+    }
+
+    // Collect consecutive HTML spans in the same parent
+    const parent = span.parentElement;
+    const group = [span];
+    let j = i + 1;
+    while (j < htmlSpans.length) {
+      const next = htmlSpans[j];
+      if (!(next instanceof HTMLElement) || next.parentElement !== parent) break;
+      group.push(next);
+      j++;
+    }
+
+    // Combine all data-values in the group
+    const combinedHtml = group.map((s) => s.dataset.value || '').join('\n');
+
+    // Check if the combined HTML contains a complete block-level element
+    if (!/<(table|thead|tbody|tfoot|tr|th|td|div|section|article|aside|header|footer|nav|figure|figcaption|details|summary|main|form|fieldset|dl|address)(\s|>)/i.test(combinedHtml)) {
+      i = j;
+      continue;
+    }
+
+    // Skip if already rendered with same content
+    if (span.dataset.ushioBlockHtmlRenderedValue === combinedHtml) {
+      i = j;
+      continue;
+    }
+
+    const template = document.createElement('template');
+    template.innerHTML = combinedHtml;
+    sanitizeHtmlFragment(template.content);
+
+    // Render the combined HTML into the first span
+    span.textContent = '';
+    span.append(template.content.cloneNode(true));
+    span.classList.add('ushio-html-block');
+    span.dataset.ushioBlockHtmlRenderedValue = combinedHtml;
+
+    // Hide the remaining spans in the group
+    for (let k = 1; k < group.length; k++) {
+      group[k].style.display = 'none';
+      group[k].dataset.ushioBlockHtmlHidden = 'true';
+    }
+
+    i = j;
+  }
+};
+
+const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onerror = () => reject(reader.error ?? new Error('file_read_failed'));
+  reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+  reader.readAsDataURL(file);
+});
+
+const createUploadImageNode = (schema, item) => {
+  const srcRaw = typeof item?.src === 'string' ? item.src.trim() : '';
+  if (!srcRaw) return null;
+  const src = resolveInsertImageSrc(srcRaw);
+  if (!src) return null;
+  const alt = typeof item?.alt === 'string' ? item.alt : '';
+  const imageNodeType = schema.nodes?.image;
+  if (!imageNodeType) return null;
+  return imageNodeType.create({ src, alt });
+};
+
+const customUploadHandler = async (files, schema) => {
+  const pipelineStartedAt = Date.now();
+  let stage = 'validate';
+  const normalizedFiles = Array.from(files ?? []);
+  if (normalizedFiles.length <= 0) return [];
+  try {
+    if (normalizedFiles.length > MAX_UPLOAD_FILES) {
+      throw new Error('upload_too_many_files');
+    }
+    let totalBytes = 0;
+    const filePayload = [];
+    stage = 'encode';
+    const encodeStartedAt = Date.now();
+    for (const file of normalizedFiles) {
+      const size = Number.isFinite(file.size) ? file.size : 0;
+      if (size <= 0) {
+        throw new Error('upload_empty_file');
+      }
+      if (size > MAX_UPLOAD_FILE_BYTES) {
+        throw new Error('upload_file_too_large');
+      }
+      totalBytes += size;
+      if (totalBytes > MAX_UPLOAD_TOTAL_BYTES) {
+        throw new Error('upload_total_too_large');
+      }
+      filePayload.push({
+        name: file.name ?? '',
+        type: file.type ?? '',
+        size,
+        dataUrl: await readFileAsDataUrl(file),
+      });
+    }
+    emit('on_cmd_metric', {
+      cmd: 'upload_encode',
+      ok: true,
+      durationMs: Math.max(0, Date.now() - encodeStartedAt),
+    });
+    const requestId = nextRequestId();
+    let timeoutId = null;
+    const resultPromise = new Promise((resolve, reject) => {
+      pendingUploadResolvers.set(requestId, { resolve, reject });
+      timeoutId = setTimeout(() => {
+        if (!pendingUploadResolvers.has(requestId)) return;
+        pendingUploadResolvers.delete(requestId);
+        reject(new Error('upload_timeout'));
+      }, 120000);
+    });
+    emit('on_upload_images_request', { requestId, files: filePayload });
+    stage = 'await_result';
+    const waitStartedAt = Date.now();
+    try {
+      const result = await resultPromise;
+      emit('on_cmd_metric', {
+        cmd: 'upload_bridge_wait',
+        ok: true,
+        durationMs: Math.max(0, Date.now() - waitStartedAt),
+      });
+      stage = 'apply_result';
+      const applyStartedAt = Date.now();
+      if (!result || typeof result !== 'object') return [];
+      const images = Array.isArray(result.images) ? result.images : [];
+      const nodes = images
+        .map((item) => createUploadImageNode(schema, item))
+        .filter(Boolean);
+      emit('on_cmd_metric', {
+        cmd: 'upload_apply_result',
+        ok: true,
+        durationMs: Math.max(0, Date.now() - applyStartedAt),
+      });
+      emit('on_cmd_metric', {
+        cmd: 'upload_pipeline',
+        ok: true,
+        durationMs: Math.max(0, Date.now() - pipelineStartedAt),
+      });
+      return nodes;
+    } finally {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+    }
+  } catch (error) {
+    emit('on_cmd_metric', {
+      cmd: 'upload_pipeline',
+      ok: false,
+      reason: `${stage}:${String(error?.message || error)}`,
+      durationMs: Math.max(0, Date.now() - pipelineStartedAt),
+    });
+    throw error;
+  }
+};
+
+// remark-stringify 在「文档以列表结尾」时会补一个空行；用户文件通常只有一个结尾换行。
+const normalizeTrailingNewline = (markdown) => (
+  typeof markdown === 'string' && markdown ? markdown.replace(/\n+$/, '\n') : markdown
+);
+
+const flushContentChange = () => {
+  if (pendingContentMarkdown == null) return;
+  const markdown = normalizeTrailingNewline(
+    deproxyImageUrlsInMarkdown(pendingContentMarkdown, currentBaseDirectory),
+  );
+  const mode = pendingContentMode || 'full';
+  pendingContentMarkdown = null;
+  pendingContentMode = 'full';
+  emit('on_content_change', {
+    mode,
+    markdown,
+  });
+};
+
+const scheduleContentChange = (markdown, { mode = 'full' } = {}) => {
+  // Validate input to prevent runtime errors
+  if (markdown == null || typeof markdown !== 'string') return;
+
+  pendingContentMarkdown = currentFrontmatter ? `${currentFrontmatter}${markdown}` : markdown;
+  pendingContentMode = mode;
+  if (contentChangeTimerId != null) {
+    clearTimeout(contentChangeTimerId);
+  }
+  // Use adaptive debounce based on file size
+  const debounceMs = calculateAdaptiveDebounceMs(markdown.length);
+  contentChangeTimerId = setTimeout(() => {
+    contentChangeTimerId = null;
+    flushContentChange();
+  }, debounceMs);
+};
+
+// Phase 0 度量用：O(1) 规模读数，避免测量本身改变被测量的成本
+const perfSizes = () => {
+  const pm = app.querySelector('.ProseMirror');
+  return {
+    chars: currentMarkdown.length,
+    topBlocks: pm ? pm.childElementCount : 0,
+    readOnly: currentReadOnly ? 1 : 0,
+  };
+};
+
+const emitOutlineUpdate = () => {
+  const outline = parseMarkdownOutline(currentMarkdown).map(({ id, level, text }) => ({
+    id,
+    level,
+    text,
+  }));
+  emit('on_outline_update', { outline });
+};
+
+const findCodeBlockPosAtSelection = (state, pos) => {
+  const $pos = state.doc.resolve(Math.max(0, Math.min(pos, state.doc.content.size)));
+  for (let depth = $pos.depth; depth > 0; depth -= 1) {
+    const node = $pos.node(depth);
+    if (node?.type?.name === 'code_block') {
+      return $pos.before(depth);
+    }
+  }
+  return null;
+};
+
+const normalizeCodeLanguage = (language) => {
+  if (typeof language !== 'string') return '';
+  return language.trim().toLowerCase();
+};
+
+const isPlainTextLanguage = (language) => {
+  const normalized = normalizeCodeLanguage(language);
+  return (
+    !normalized ||
+    normalized === 'plain text' ||
+    normalized === 'plaintext' ||
+    normalized === 'none' ||
+    normalized === 'text' ||
+    normalized === '无语言' ||
+    normalized === '纯文本'
+  );
+};
+
+const getCodeLanguageButton = (codeBlock) => {
+  if (!(codeBlock instanceof HTMLElement)) return null;
+  const customButton = codeBlock.querySelector('.tools .ushio-language-input, .tools .ushio-language-trigger');
+  if (customButton instanceof HTMLElement) return customButton;
+  const nativeButton = codeBlock.querySelector('.tools .language-button');
+  return nativeButton instanceof HTMLElement ? nativeButton : null;
+};
+
+const ensureCustomLanguageTrigger = (tools) => {
+  if (!(tools instanceof HTMLElement)) return null;
+  let trigger = tools.querySelector(':scope > .ushio-language-input');
+  if (trigger instanceof HTMLElement) return trigger;
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'ushio-language-input';
+  input.dataset.ushioLanguageBind = '0';
+  input.value = 'plain text';
+  input.placeholder = 'plain text';
+  input.spellcheck = false;
+  tools.append(input);
+  return input;
+};
+
+/**
+ * 一次文档走查取全部 code_block 的语言（文档序）。
+ * 旧实现对每个代码块都跑一次 editorInstance.action + view.posAtDOM + doc.resolve，
+ * 等于把 O(代码块数) 次 ProseMirror 反查塞进渲染收尾里。
+ */
+const collectDocCodeLanguages = () => {
+  if (!editorInstance) return null;
+  try {
+    return editorInstance.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const languages = [];
+      const walk = (node) => {
+        if (node.type.name === 'code_block') {
+          languages.push(typeof node.attrs?.language === 'string' ? node.attrs.language : '');
+          return;
+        }
+        node.forEach((child) => walk(child));
+      };
+      view.state.doc.forEach((child) => walk(child));
+      return languages;
+    });
+  } catch (_) {
+    return null;
+  }
+};
+
+const resolveCodeBlockLanguage = (codeBlock, docLanguage = '', fallback = '') => {
+  if (!(codeBlock instanceof HTMLElement)) return '';
+
+  const docLang = normalizeCodeLanguage(docLanguage);
+  if (!isPlainTextLanguage(docLang)) return docLang;
+
+  const preLanguage = normalizeCodeLanguage(codeBlock.querySelector('pre')?.getAttribute('data-language') || '');
+  if (!isPlainTextLanguage(preLanguage)) {
+    return preLanguage;
+  }
+
+  const fallbackLanguage = normalizeCodeLanguage(fallback);
+  return isPlainTextLanguage(fallbackLanguage) ? '' : fallbackLanguage;
+};
+
+const resolveCodeLanguageForBackend = (rawLanguage) => {
+  const normalized = normalizeCodeLanguage(rawLanguage);
+  if (!normalized || isPlainTextLanguage(normalized)) return '';
+  return KNOWN_CODE_LANGUAGE_MAP.get(normalized) || '';
+};
+
+const buildCodeLanguageCacheKey = (codeBlock, fallbackIndex = -1) => {
+  if (!(codeBlock instanceof HTMLElement)) return `idx:${fallbackIndex}`;
+  const text = (codeBlock.querySelector('.cm-content')?.textContent || codeBlock.querySelector('pre')?.textContent || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160);
+  return `${fallbackIndex}::${text}`;
+};
+
+const preventCodeEditorFocusJump = () => {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)) return;
+  if (!active.classList.contains('ushio-language-input')) return;
+  setTimeout(() => {
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && focused.classList.contains('cm-content')) {
+      active.focus();
+      if (active instanceof HTMLInputElement) {
+        const len = active.value.length;
+        active.setSelectionRange(len, len);
+      }
+    }
+  }, 0);
+};
+
+const formatCodeLanguageLabel = (language) => {
+  const normalized = normalizeCodeLanguage(language);
+  return isPlainTextLanguage(normalized) ? 'plain text' : normalized;
+};
+
+const resolveFallbackLanguageFromBlock = (codeBlock) => {
+  if (!(codeBlock instanceof HTMLElement)) return '';
+  const customTrigger = codeBlock.querySelector('.tools .ushio-language-input');
+  const customDatasetLanguage = normalizeCodeLanguage(customTrigger?.dataset?.displayLanguage || customTrigger?.value || '');
+  if (!isPlainTextLanguage(customDatasetLanguage)) {
+    return (customTrigger?.dataset?.displayLanguage || customTrigger?.value || '').trim();
+  }
+  const nativeButtonText = normalizeCodeLanguage(codeBlock.querySelector('.tools .language-button')?.textContent || '');
+  if (!isPlainTextLanguage(nativeButtonText)) {
+    return (codeBlock.querySelector('.tools .language-button')?.textContent || '').trim();
+  }
+  return '';
+};
+
+const emitCodeLanguageUiDebug = (kind, payload = {}) => {
+  emit('on_debug_report', {
+    kind: 'codeblock_language_popup_event',
+    event: kind,
+    seq: ++codeLanguageUiDebugSeq,
+    ...payload,
+  });
+};
+
+const setCodeBlockLanguage = (codeBlock, language) => {
+  if (!editorInstance || !codeBlock) return false;
+  let ok = false;
+  const nextLanguage = normalizeCodeLanguage(language);
+  editorInstance.action((ctx) => {
+    const view = ctx.get(editorViewCtx);
+    const { state } = view;
+    let codeBlockPos = null;
+
+    const { $from } = state.selection;
+    for (let depth = $from.depth; depth > 0; depth -= 1) {
+      const node = $from.node(depth);
+      if (node?.type?.name === 'code_block') {
+        codeBlockPos = $from.before(depth);
+        break;
+      }
+    }
+
+    if (codeBlockPos == null) {
+      const anchorDom = codeBlock.querySelector('.cm-content') || codeBlock.querySelector('.cm-editor') || codeBlock;
+      try {
+        const domPos = view.posAtDOM(anchorDom, 0);
+        codeBlockPos = findCodeBlockPosAtSelection(state, domPos);
+      } catch (_) {
+        codeBlockPos = null;
+      }
+    }
+
+    if (codeBlockPos == null) return;
+    const node = state.doc.nodeAt(codeBlockPos);
+    if (!node || node.type.name !== 'code_block') return;
+
+    const currentLanguage = typeof node.attrs?.language === 'string' ? node.attrs.language.trim().toLowerCase() : '';
+    if (currentLanguage === nextLanguage) {
+      ok = true;
+      return;
+    }
+
+    const nextAttrs = {
+      ...node.attrs,
+      language: nextLanguage || undefined,
+    };
+    view.dispatch(state.tr.setNodeMarkup(codeBlockPos, undefined, nextAttrs));
+    ok = true;
+  });
+  return ok;
+};
+
+const updateCodeLanguageButtonLabel = (codeBlock, language) => {
+  const languageButton = getCodeLanguageButton(codeBlock);
+  if (!(languageButton instanceof HTMLElement)) return;
+
+  const normalizedLanguage = normalizeCodeLanguage(language);
+  const effectiveLanguage = isPlainTextLanguage(normalizedLanguage) ? '' : normalizedLanguage;
+  const displayText = (languageButton.dataset.displayLanguage || '').trim();
+  const label = displayText || formatCodeLanguageLabel(effectiveLanguage);
+  if (languageButton instanceof HTMLInputElement) {
+    languageButton.value = label;
+  } else {
+    languageButton.textContent = label;
+  }
+  languageButton.dataset.language = effectiveLanguage;
+  languageButton.dataset.displayLanguage = label;
+  languageButton.dataset.hasLanguage = effectiveLanguage ? 'true' : 'false';
+  languageButton.setAttribute('title', `代码语言：${label}`);
+  languageButton.setAttribute('aria-label', `代码语言，当前 ${label}`);
+};
+
+
+const syncRenderedDom = () => {
+  // 分段打点：1.5 秒的冷路径收尾到底花在哪一段，只靠读代码已经猜错过一次。
+  const P = perfStartSections();
+  const root = app.querySelector('.milkdown') || app;
+  renderRawHtmlNodes(root);
+  P.mark('rawHtml');
+  renderBlockHtmlGroups(root);
+  P.mark('blockHtmlGroups');
+  renderHtmlBlockCodeNodes(root);
+  P.mark('htmlOverlay');
+  const markdownImageSources = collectMarkdownImageSources(currentMarkdown);
+  P.mark('scanImages');
+
+  // 末尾不是文本块时 ProseMirror 会塞一个无 src 的 <img class="ProseMirror-separator">，
+  // 它既不是文档里的图片、也不该参与下面按序取源，单独排除掉才能让这条不变量只报真问题。
+  const domImages = root.querySelectorAll('.ProseMirror img:not(.ProseMirror-separator)');
+  if (domImages.length !== markdownImageSources.length) {
+    console.warn('[syncRenderedDom] Image count mismatch:', {
+      domCount: domImages.length,
+      markdownCount: markdownImageSources.length,
+      markdownSources: markdownImageSources,
+      domSrcs: Array.from(domImages).map((img, i) => ({
+        index: i,
+        src: img.getAttribute('src'),
+        dataType: img.getAttribute('data-type'),
+        className: img.className,
+      })),
+    });
+  }
+
+  root.querySelectorAll('.ProseMirror img:not(.ProseMirror-separator)').forEach((img, imageIndex) => {
+    const rawSrc = img.getAttribute('src') || '';
+
+    // If already a custom scheme URL, just set up event handlers and data attributes
+    if (rawSrc.startsWith(`${LOCAL_FILE_SCHEME}://`)) {
+      if (!img.dataset.ushioSrc) {
+        img.setAttribute('data-ushio-src', rawSrc);
+      }
+      if (!img.dataset.ushioLoadBound) {
+        img.dataset.ushioLoadBound = '1';
+        img.addEventListener('load', () => {
+          delete img.dataset.ushioFallbackTried;
+          img.classList.remove('ushio-image-load-failed');
+          img.closest('.milkdown-image-block')?.classList.remove('ushio-image-load-failed');
+        });
+      }
+      if (!img.dataset.ushioErrorBound) {
+        img.dataset.ushioErrorBound = '1';
+        img.addEventListener('error', () => {
+          img.classList.add('ushio-image-load-failed');
+          img.closest('.milkdown-image-block')?.classList.add('ushio-image-load-failed');
+          emit('on_image_error', {
+            src: img.getAttribute('data-ushio-src') || rawSrc,
+            reason: 'load_failed',
+          });
+        });
+      }
+      return;
+    }
+
+    const sanitizedRawSrc = sanitizeImageSource(rawSrc);
+    const markdownRawSrc = sanitizeImageSource(markdownImageSources[imageIndex] || '');
+    if (sanitizedRawSrc && sanitizedRawSrc !== rawSrc) {
+      img.setAttribute('src', sanitizedRawSrc);
+    }
+    const preferredRawSrc = sanitizedRawSrc || markdownRawSrc || rawSrc;
+    const resolvedSrc = resolveImageSrc(preferredRawSrc);
+    const fallbackResolvedSrc = resolveImageSrc(markdownRawSrc || sanitizedRawSrc || rawSrc);
+    if (fallbackResolvedSrc) {
+      img.dataset.ushioFallbackSrc = fallbackResolvedSrc;
+    } else {
+      delete img.dataset.ushioFallbackSrc;
+    }
+    if (resolvedSrc && img.getAttribute('src') !== resolvedSrc) {
+      img.setAttribute('src', resolvedSrc);
+      img.setAttribute('data-ushio-src', resolvedSrc);
+    }
+    if (!img.dataset.ushioLoadBound) {
+      img.dataset.ushioLoadBound = '1';
+      img.addEventListener('load', () => {
+        delete img.dataset.ushioFallbackTried;
+        img.classList.remove('ushio-image-load-failed');
+        img.closest('.milkdown-image-block')?.classList.remove('ushio-image-load-failed');
+      });
+    }
+    if (!img.dataset.ushioErrorBound) {
+      img.dataset.ushioErrorBound = '1';
+      img.addEventListener('error', () => {
+        const fallbackSrc = img.dataset.ushioFallbackSrc || '';
+        if (
+          fallbackSrc
+          && img.dataset.ushioFallbackTried !== '1'
+          && img.getAttribute('src') !== fallbackSrc
+        ) {
+          img.dataset.ushioFallbackTried = '1';
+          img.setAttribute('src', fallbackSrc);
+          img.setAttribute('data-ushio-src', fallbackSrc);
+          return;
+        }
+        img.classList.add('ushio-image-load-failed');
+        img.closest('.milkdown-image-block')?.classList.add('ushio-image-load-failed');
+        emit('on_image_error', {
+          src: img.getAttribute('data-ushio-src') || fallbackSrc || resolvedSrc || markdownRawSrc || sanitizedRawSrc || rawSrc,
+          reason: 'load_failed',
+        });
+      });
+    }
+  });
+
+  P.mark('imgPass');
+  root.querySelectorAll('.ProseMirror a').forEach((anchor) => {
+    if (anchor.closest('.milkdown-code-block .tools')) return;
+    const rawHref = anchor.getAttribute('href') || '';
+    if (!rawHref) return;
+    if (rawHref.startsWith('#')) return;
+    const resolved = resolveHref(rawHref);
+    if (resolved) {
+      anchor.setAttribute('data-ushio-href', resolved);
+    }
+  });
+
+  P.mark('anchorPass');
+  const headingOutline = parseMarkdownOutline(currentMarkdown);
+  const consumedOutlineIndexes = new Set();
+  const headingIdMap = new Map(); // Track used heading IDs for uniqueness
+  
+  root.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach((heading, index) => {
+    const headingText = (heading.textContent || '').trim();
+    const headingLevel = Number.parseInt((heading.tagName || '').replace(/^H/i, ''), 10);
+    
+    // Validate heading level
+    if (!Number.isFinite(headingLevel) || headingLevel < 1 || headingLevel > 6) {
+      console.warn('[Milkdown] Invalid heading level detected:', headingLevel, heading);
+      return; // Skip invalid heading
+    }
+    
+    let outlineIndex = index;
+    let outlineNode = headingOutline[outlineIndex];
+    const outlineMatchesHeading = outlineNode
+      && outlineNode.text === headingText
+      && outlineNode.level === headingLevel;
+
+    if (!outlineMatchesHeading || consumedOutlineIndexes.has(outlineIndex)) {
+      outlineIndex = headingOutline.findIndex((candidate, candidateIndex) => (
+        !consumedOutlineIndexes.has(candidateIndex)
+        && candidate.level === headingLevel
+        && candidate.text === headingText
+      ));
+      if (outlineIndex < 0) {
+        outlineIndex = headingOutline.findIndex((_, candidateIndex) => !consumedOutlineIndexes.has(candidateIndex));
+      }
+      outlineNode = outlineIndex >= 0 ? headingOutline[outlineIndex] : null;
+    }
+
+    if (outlineIndex >= 0) {
+      consumedOutlineIndexes.add(outlineIndex);
+    }
+
+    const text = (outlineNode?.text || headingText).trim();
+    const previousLineNumber = Number.parseInt(heading.dataset.headingLine || '', 10);
+    let lineNumber = Number.isFinite(outlineNode?.lineNumber)
+      ? outlineNode.lineNumber
+      : Number.isFinite(previousLineNumber)
+        ? previousLineNumber
+        : index;
+    
+    // Ensure heading ID uniqueness
+    let baseId = `heading-line-${lineNumber}`;
+    let finalId = baseId;
+    let counter = 1;
+    
+    while (headingIdMap.has(finalId)) {
+      finalId = `${baseId}-${counter}`;
+      counter++;
+    }
+    
+    heading.id = finalId;
+    heading.dataset.headingLine = String(lineNumber);
+    heading.dataset.headingSlug = slugifyHeading(text);
+    
+    headingIdMap.set(finalId, {
+      index,
+      text,
+      level: headingLevel,
+      lineNumber,
+    });
+  });
+
+  P.mark('headingPass');
+  root.querySelectorAll('.milkdown-table-block').forEach((block) => {
+    applyHorizontalScrollClass(block);
+    const table = block.querySelector('table');
+    if (table instanceof HTMLTableElement) {
+      markTablePathColumns(table);
+    }
+  });
+
+  root.querySelectorAll('.ProseMirror pre').forEach((block) => {
+    applyHorizontalScrollClass(block);
+  });
+
+  P.mark('tablePrePass');
+  const fenceLanguages = collectFenceLanguages(currentMarkdown);
+  const docCodeLanguages = collectDocCodeLanguages();
+  P.mark('scanFences');
+
+  // 不变量：「DOM 代码块数 == 文档 code_block 数」（两者同为文档序）。
+  // 旧实现拿 markdown 围栏数来比，内联代码与嵌套场景下会假报警。
+  // HTML 块槽刻意复用 milkdown-code-block 这个类名好让 overlay 机器不用改，
+  // 但它的节点类型不是 code_block、也不走下面的 codeBlockPass，所以两边都要排除，
+  // 否则这条不变量会被自己的实现细节刷成永久告警。
+  const domCodeBlocks = root.querySelectorAll('.milkdown-code-block:not([data-ushio-html-block-slot])');
+  if (docCodeLanguages && domCodeBlocks.length !== docCodeLanguages.length) {
+    console.warn('[syncRenderedDom] Code block count mismatch:', {
+      domCount: domCodeBlocks.length,
+      docCount: docCodeLanguages.length,
+      markdownFenceCount: fenceLanguages.length,
+    });
+  }
+
+  P.mark('codeBlockQuery');
+  root.querySelectorAll('.milkdown-code-block:not([data-ushio-html-block-slot])').forEach((block, codeBlockIndex) => {
+    if (!(block instanceof HTMLElement)) return;
+
+    // Skip html-block code blocks — they are rendered as HTML and hidden by injected CSS
+    if (isHtmlBlockCodeNode(block)) {
+      hideHtmlBlockCodeNode(block);
+      return;
+    }
+
+    // Style non-html-block code blocks for custom UI (tools positioning, etc.)
+    setImportantStyleIfNeeded(block, 'display', 'block');
+    setImportantStyleIfNeeded(block, 'position', 'relative');
+    setImportantStyleIfNeeded(block, 'overflow', 'visible');
+    setImportantStyleIfNeeded(block, 'padding-top', '8px');
+
+    const tools = block.querySelector(':scope > .tools, .tools');
+    if (!(tools instanceof HTMLElement)) return;
+    setImportantStyleIfNeeded(tools, 'position', 'absolute');
+    setImportantStyleIfNeeded(tools, 'left', 'auto');
+    setImportantStyleIfNeeded(tools, 'right', '8px');
+    setImportantStyleIfNeeded(tools, 'top', '8px');
+    setImportantStyleIfNeeded(tools, 'bottom', 'auto');
+    setImportantStyleIfNeeded(tools, 'transform', 'none');
+
+    const nativePicker = block.querySelector('.language-picker');
+    if (nativePicker instanceof HTMLElement) {
+      setImportantStyleIfNeeded(nativePicker, 'display', 'none');
+      setImportantStyleIfNeeded(nativePicker, 'visibility', 'hidden');
+      setImportantStyleIfNeeded(nativePicker, 'opacity', '0');
+      setImportantStyleIfNeeded(nativePicker, 'pointer-events', 'none');
+    }
+
+    const nativeLanguageButton = block.querySelector('.tools .language-button');
+    if (nativeLanguageButton instanceof HTMLElement) {
+      setImportantStyleIfNeeded(nativeLanguageButton, 'display', 'none');
+      setImportantStyleIfNeeded(nativeLanguageButton, 'visibility', 'hidden');
+      setImportantStyleIfNeeded(nativeLanguageButton, 'pointer-events', 'none');
+    }
+
+    const languageButton = ensureCustomLanguageTrigger(tools);
+    if (!(languageButton instanceof HTMLElement)) return;
+
+    languageButton.classList.remove('language-button');
+    languageButton.classList.add('ushio-language-input');
+
+    const currentLanguage = resolveCodeBlockLanguage(
+      block,
+      (docCodeLanguages && docCodeLanguages[codeBlockIndex]) || '',
+      languageButton.dataset.language || resolveFallbackLanguageFromBlock(block) || fenceLanguages[codeBlockIndex] || '',
+    );
+    const cacheKey = buildCodeLanguageCacheKey(block, codeBlockIndex);
+    const displayLanguage = (
+      codeLanguageDisplayCache.get(cacheKey) ||
+      resolveFallbackLanguageFromBlock(block) ||
+      fenceLanguages[codeBlockIndex] ||
+      ''
+    ).trim();
+    languageButton.dataset.displayLanguage = displayLanguage || formatCodeLanguageLabel(currentLanguage);
+    updateCodeLanguageButtonLabel(block, currentLanguage);
+
+    if (languageButton.dataset.ushioLanguageBind !== '1') {
+      const stopBubble = (event) => {
+        event.stopPropagation();
+      };
+
+      const commit = () => {
+        if (!(languageButton instanceof HTMLInputElement)) return;
+        const rawInput = (languageButton.value || '').trim();
+        const backendLanguage = resolveCodeLanguageForBackend(rawInput);
+        const displayValue = rawInput || 'plain text';
+        const applied = setCodeBlockLanguage(block, backendLanguage);
+        if (applied) {
+          const nextCacheKey = buildCodeLanguageCacheKey(block, codeBlockIndex);
+          codeLanguageDisplayCache.set(nextCacheKey, displayValue);
+          languageButton.dataset.displayLanguage = displayValue;
+          updateCodeLanguageButtonLabel(block, backendLanguage);
+        }
+      };
+
+      languageButton.addEventListener('pointerdown', stopBubble);
+      languageButton.addEventListener('mousedown', stopBubble);
+      languageButton.addEventListener('click', stopBubble);
+      languageButton.addEventListener('keydown', (event) => {
+        stopBubble(event);
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          commit();
+          preventCodeEditorFocusJump();
+          return;
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          updateCodeLanguageButtonLabel(block, languageButton.dataset.language || '');
+          languageButton.blur();
+        }
+      });
+      languageButton.addEventListener('blur', commit);
+      languageButton.dataset.ushioLanguageBind = '1';
+    }
+  });
+
+  P.mark('codeBlockPass');
+  attachHorizontalWheelScroll();
+  P.mark('wheelBind');
+
+  root.querySelectorAll('input[type="checkbox"]').forEach((checkbox, index) => {
+    checkbox.dataset.checkboxIndex = String(index);
+    checkbox.setAttribute('tabindex', '-1');
+  });
+
+  P.mark('checkboxPass');
+  root.querySelectorAll('.ushio-code-actions-row').forEach((row) => {
+    row.remove();
+  });
+  P.mark('cleanup');
+  const sizes = perfSizes();
+  perfSetSections(P.report(), sizes);
+  perfRecordEvent('syncdetail', { ...P.report(), ...sizes });
+};
+
+const emitHistoryState = () => {
+  if (!editorInstance) return;
+  let canUndo = false;
+  let canRedo = false;
+  editorInstance.action((ctx) => {
+    const view = ctx.get(editorViewCtx);
+    const state = view?.state;
+    if (!state) return;
+    canUndo = undoDepth(state) > 0;
+    canRedo = redoDepth(state) > 0;
+  });
+  emit('on_history_state', {
+    canUndo,
+    canRedo,
+  });
+};
+
+const emitRenderProgress = (progress) => {
+  const clamped = Math.max(0, Math.min(1, progress));
+  emit('on_render_progress', { progress: clamped });
+};
+
+const cancelProgressiveRender = () => {
+  progressiveRenderCancelled = true;
+  progressiveRenderPending = false;
+  progressiveFirstPaintEmitted = false;
+  if (progressiveRenderTimerId != null) {
+    clearTimeout(progressiveRenderTimerId);
+    progressiveRenderTimerId = null;
+  }
+};
+
+const emitFirstRenderReady = () => {
+  requestAnimationFrame(() => {
+    const s0 = perfNow();
+    syncRenderedDom();
+    const s1 = perfNow();
+    updateActiveMarkdownHints();
+    const s2 = perfNow();
+    emit('on_render_complete', {});
+    const s3 = perfNow();
+    // 渐进渲染的收尾走这条路径而不是 notifyRenderComplete，之前没有样本，
+    // 导致「大文档到底有没有渲染完」在数据上不可见。
+    perfRecordSettle({
+      syncMs: s1 - s0,
+      hintMs: s2 - s1,
+      outlineMs: 0,
+      historyMs: 0,
+      settleTotalMs: s3 - s0,
+      firstPaint: 1,
+    }, perfSizes());
+  });
+};
+
+const notifyRenderComplete = () => {
+  cancelProgressiveRender();
+  requestAnimationFrame(() => {
+    const s0 = perfNow();
+    syncRenderedDom();
+    const s1 = perfNow();
+    updateActiveMarkdownHints();
+    const s2 = perfNow();
+    emitOutlineUpdate();
+    const s3 = perfNow();
+    emit('on_render_complete', {});
+    emitHistoryState();
+    const s4 = perfNow();
+    perfRecordSettle({
+      syncMs: s1 - s0,
+      hintMs: s2 - s1,
+      outlineMs: s3 - s2,
+      historyMs: s4 - s3,
+      settleTotalMs: s4 - s0,
+    }, perfSizes());
+  });
+};
+
+const endEditorInitialization = () => {
+  initializingEditor = false;
+  lastEditorInteractionAt = Date.now();
+  if (initializingEditorTimer != null) {
+    clearTimeout(initializingEditorTimer);
+    initializingEditorTimer = null;
+  }
+};
+
+const markEditorInteraction = () => {
+  lastEditorInteractionAt = Date.now();
+};
+
+const markEditorInitializing = () => {
+  initializingEditor = true;
+  if (!editorUserInputListenerAttached) {
+    editorUserInputListenerAttached = true;
+    ['beforeinput', 'keydown', 'compositionstart', 'paste'].forEach((eventName) => {
+      app.addEventListener(eventName, endEditorInitialization, true);
+    });
+  }
+  if (initializingEditorTimer != null) {
+    clearTimeout(initializingEditorTimer);
+  }
+  initializingEditorTimer = setTimeout(endEditorInitialization, 1500);
+};
+
+/**
+ * 把一段 markdown 解析成 fragment 后追加到文档末尾。
+ * 不用 @milkdown/utils 的 replaceRange —— 它经 DOMSerializer→DOMParser 往返，
+ * 对 CodeMirror / math 这类 nodeView 的渲染结果不可靠。
+ */
+const appendMarkdownChunk = (chunk) => {
+  if (!editorInstance) return;
+  editorInstance.action((ctx) => {
+    const parse = ctx.get(parserCtx);
+    const view = ctx.get(editorViewCtx);
+    const chunkDoc = parse(chunk);
+    if (!chunkDoc || !chunkDoc.childCount) return;
+    const { state } = view;
+    const at = state.doc.content.size;
+    // 载入文档不该进撤销栈：旧实现每步 replaceAll 会把整篇载入记成多步历史，
+    // 首次撤销就可能清空文档（CHANGELOG.md:168 记过）。同时 addToHistory=false
+    // 会让 plugin-listener 跳过该 tr，省掉每步一次的全文序列化与预处理。
+    view.dispatch(
+      state.tr.replaceWith(at, at, chunkDoc.content).setMeta('addToHistory', false),
+    );
+  });
+};
+
+const setMarkdown = (markdown, { emitContent = false, forceRender = false } = {}) => {
+  emitDebug(`[JS] setMarkdown: len=${markdown?.length}, forceRender=${forceRender}`);
+  markEditorInitializing();
+  const rawMarkdown = typeof markdown === 'string' ? markdown : '';
+  const { frontmatter, body } = splitFrontmatter(rawMarkdown);
+  currentFrontmatter = frontmatter;
+  sourceMarkdownBody = body;
+  documentEdited = false;
+  const nextMarkdown = body;
+  emitDebug(`[JS] setMarkdown: nextMarkdown === currentMarkdown: ${nextMarkdown === currentMarkdown}`);
+  // Skip equality check if forceRender is true (needed when switching documents)
+  if (!forceRender && nextMarkdown === currentMarkdown) {
+    emitDebug('[JS] setMarkdown: skipping (same content)');
+    return;
+  }
+  if (contentChangeTimerId != null) {
+    clearTimeout(contentChangeTimerId);
+    contentChangeTimerId = null;
+  }
+  pendingContentMarkdown = null;
+  currentMarkdown = nextMarkdown;
+  if (!editorInstance) {
+    emitDebug('[JS] setMarkdown: no editorInstance, returning');
+    return;
+  }
+  isApplyingFromFlutter = !emitContent;
+  // Pre-process: wrap HTML blocks as code fences, then resolve image URLs
+  const htmlWrappedMarkdown = wrapHtmlBlocksInCodeFence(nextMarkdown);
+  const preprocessedMarkdown = preprocessImages(htmlWrappedMarkdown);
+  currentMarkdown = preprocessedMarkdown;
+  if (preprocessedMarkdown.length > PROGRESSIVE_RENDER_THRESHOLD_CHARS) {
+    emitDebug(`[JS] setMarkdown: using progressive render (${preprocessedMarkdown.length} chars)`);
+    cancelProgressiveRender();
+    progressiveRenderCancelled = false;
+    progressiveRenderPending = true;
+    progressiveFirstPaintEmitted = false;
+    let cursor = 0;
+    const total = preprocessedMarkdown.length;
+    const appendCuts = appendRenderEnabled
+      ? findAppendSplitPoints(preprocessedMarkdown, APPEND_MIN_CHUNK_CHARS)
+      : [];
+    const useAppend = appendCuts.length > 0;
+    let cutIndex = 0;
+    emitDebug(`[JS] setMarkdown: progressive mode=${useAppend ? `append(${appendCuts.length} cuts)` : 'prefix-replaceAll'}`);
+    const renderStep = () => {
+      if (progressiveRenderCancelled) return;
+      if (cursor >= total) {
+        progressiveRenderPending = false;
+        notifyRenderComplete();
+        return;
+      }
+      const perfStep0 = perfNow();
+      let chunkChars = 0;
+      if (useAppend) {
+        const wanted = cutIndex < appendCuts.length ? appendCuts[cutIndex] : total;
+        cutIndex += 1;
+        const end = Math.min(total, Math.max(wanted, cursor + 2048));
+        // 片尾空白必须裁掉：切点总在空行之后，留着会让这一片以空行结尾，
+        // 独立解析时多出一个空段落（序列化回来就是一个 <br />），
+        // 与整篇一次解析的产物不一致。块边界处的尾部空白没有语义。
+        const chunk = preprocessedMarkdown.slice(cursor, end).replace(/[ \t\r\n]+$/, '');
+        if (cursor === 0) {
+          editorInstance.action(replaceAll(chunk, forceRender));
+        } else {
+          appendMarkdownChunk(chunk);
+        }
+        chunkChars = chunk.length;
+        cursor = end;
+      } else {
+        const nextTarget = Math.min(total, Math.max(cursor + 2048, cursor * 2 + 2048));
+        let end = preprocessedMarkdown.indexOf('\n', nextTarget);
+        if (end < 0 || end > nextTarget + 4096) end = nextTarget;
+        if (end <= cursor) end = Math.min(total, cursor + 2048);
+        const partial = preprocessedMarkdown.slice(0, end);
+        editorInstance.action(replaceAll(partial, end === total ? forceRender : false));
+        chunkChars = partial.length;
+        cursor = end;
+      }
+      perfRecordEvent('setdoc', {
+        replaceAllMs: perfNow() - perfStep0,
+        chars: cursor,
+        chunkChars,
+        appendMode: useAppend ? 1 : 0,
+        topBlocks: (app.querySelector('.ProseMirror') || { childElementCount: 0 }).childElementCount,
+        progressiveStep: 1,
+      });
+      if (!progressiveFirstPaintEmitted && cursor > 0) {
+        progressiveFirstPaintEmitted = true;
+        emitFirstRenderReady();
+      }
+      emitRenderProgress(cursor / total);
+      if (cursor < total) {
+        progressiveRenderTimerId = setTimeout(renderStep, 0);
+      } else {
+        progressiveRenderPending = false;
+        notifyRenderComplete();
+      }
+    };
+    renderStep();
+  } else {
+    emitDebug('[JS] setMarkdown: calling editorInstance.action(replaceAll)');
+    const perfFull0 = perfNow();
+    editorInstance.action(replaceAll(preprocessedMarkdown, forceRender));
+    if (forceRender) {
+      // flush=true 会重建 EditorState：listener 的 state.init 以新文档为 prevDoc，
+      // 因此不会有「初始回波」需要吞。继续挂着 applyingFromFlutter 与 1.5s 闸门，
+      // 只会把用户的第一笔编辑（尤其是勾选框/工具栏命令）静默丢掉。
+      isApplyingFromFlutter = false;
+      endEditorInitialization();
+    }
+    perfRecordEvent('setdoc', {
+      replaceAllMs: perfNow() - perfFull0,
+      chars: preprocessedMarkdown.length,
+      topBlocks: (app.querySelector('.ProseMirror') || { childElementCount: 0 }).childElementCount,
+      progressiveStep: 0,
+    });
+    emitDebug('[JS] setMarkdown: calling notifyRenderComplete');
+    notifyRenderComplete();
+  }
+  emitDebug('[JS] setMarkdown: done');
+};
+
+// baseDirectory 由模块状态注入；实现见 src/local-path.mjs
+const preprocessImages = (markdown) => preprocessImageUrlsInMarkdown(markdown, currentBaseDirectory);
+
+const showBootstrapError = (error) => {
+  app.innerHTML = `<div style="padding:16px;font-family:sans-serif;color:#dc2626;line-height:1.6;">Milkdown 初始化失败：${String(error)}</div>`;
+};
+
+const insertTextAtSelection = (view, text) => {
+  const { state } = view;
+  const { from, to } = state.selection;
+  const tr = state.tr.insertText(text, from, to);
+  view.dispatch(tr);
+};
+
+const buildFloatingButton = (label, title, className, onClick) => {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `ushio-float-btn ${className}`.trim();
+  btn.textContent = label;
+  btn.title = title;
+  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    onClick();
+  });
+  return btn;
+};
+
+// Link tooltip variables
+let linkTooltipElement = null;
+let linkTooltipAnchor = null;
+
+const createLinkTooltip = () => {
+  if (linkTooltipElement) return;
+  const tooltip = document.createElement('div');
+  tooltip.className = 'ushio-link-tooltip';
+  tooltip.dataset.show = 'false';
+
+  const preview = document.createElement('div');
+  preview.className = 'ushio-link-tooltip-preview';
+
+  const actions = document.createElement('div');
+  actions.className = 'ushio-link-tooltip-actions';
+
+  const editBtn = document.createElement('button');
+  editBtn.type = 'button';
+  editBtn.className = 'ushio-link-tooltip-btn';
+  editBtn.title = '编辑链接';
+  editBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>';
+  editBtn.addEventListener('click', () => {
+    if (linkTooltipAnchor instanceof HTMLAnchorElement) {
+      const currentHref = linkTooltipAnchor.getAttribute('href') || '';
+      const newHref = prompt('编辑链接地址:', currentHref);
+      if (newHref !== null && newHref.trim()) {
+        linkTooltipAnchor.setAttribute('href', newHref.trim());
+        linkTooltipAnchor.setAttribute('data-ushio-href', resolveHref(newHref.trim()));
+        editorInstance?.action((ctx) => {
+          const view = ctx.get(editorViewCtx);
+          view.dispatch(view.state.tr.setNodeMarkup(
+            view.state.selection.$from.before(),
+            undefined,
+            { href: newHref.trim() }
+          ));
+        });
+      }
+    }
+    hideLinkTooltip();
+  });
+
+  const openBtn = document.createElement('button');
+  openBtn.type = 'button';
+  openBtn.className = 'ushio-link-tooltip-btn';
+  openBtn.title = '在新窗口打开';
+  openBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>';
+  openBtn.addEventListener('click', () => {
+    if (linkTooltipAnchor instanceof HTMLAnchorElement) {
+      const href = linkTooltipAnchor.getAttribute('data-ushio-href') || linkTooltipAnchor.getAttribute('href') || '';
+      if (href && isExternalHref(href)) {
+        window.open(href, '_blank', 'noopener,noreferrer');
+      }
+    }
+    hideLinkTooltip();
+  });
+
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'ushio-link-tooltip-btn';
+  copyBtn.title = '复制链接';
+  copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+  copyBtn.addEventListener('click', () => {
+    if (linkTooltipAnchor instanceof HTMLAnchorElement) {
+      const href = linkTooltipAnchor.getAttribute('data-ushio-href') || linkTooltipAnchor.getAttribute('href') || '';
+      navigator.clipboard.writeText(href).then(() => {
+        copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+        setTimeout(() => {
+          copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+        }, 1500);
+      });
+    }
+  });
+
+  actions.append(copyBtn, editBtn, openBtn);
+  tooltip.append(preview, actions);
+  app.append(tooltip);
+  linkTooltipElement = tooltip;
+};
+
+const hideLinkTooltip = () => {
+  if (linkTooltipElement) {
+    linkTooltipElement.dataset.show = 'false';
+    linkTooltipAnchor = null;
+  }
+  linkTooltipShownByTouch = false;
+};
+
+const showLinkTooltip = (anchor) => {
+  if (!(anchor instanceof HTMLAnchorElement)) return;
+  createLinkTooltip();
+  if (!linkTooltipElement) return;
+  linkTooltipAnchor = anchor;
+  const href = anchor.getAttribute('data-ushio-href') || anchor.getAttribute('href') || '';
+  const preview = linkTooltipElement.querySelector('.ushio-link-tooltip-preview');
+  if (preview) {
+    preview.textContent = href.length > 60 ? href.substring(0, 60) + '...' : href;
+    preview.title = href;
+  }
+  const anchorRect = anchor.getBoundingClientRect();
+  const appRect = app.getBoundingClientRect();
+  const tooltipWidth = 280;
+  let left = anchorRect.left - appRect.left;
+  let top = anchorRect.bottom - appRect.top + 8;
+  if (left + tooltipWidth > appRect.width - 8) {
+    left = appRect.width - tooltipWidth - 8;
+  }
+  if (left < 8) left = 8;
+  linkTooltipElement.style.left = `${Math.max(8, left)}px`;
+  linkTooltipElement.style.top = `${top}px`;
+  linkTooltipElement.dataset.show = 'true';
+};
+
+const buildTableFloatingButton = () => {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'ushio-table-fab';
+  button.title = '表格工具';
+  button.textContent = '表格';
+  button.dataset.show = 'false';
+  button.addEventListener('mousedown', (e) => e.preventDefault());
+  button.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (!tableFloatingPanelElement) return;
+    tableFloatingPanelElement.dataset.show =
+      tableFloatingPanelElement.dataset.show === 'true' ? 'false' : 'true';
+  });
+  return button;
+};
+
+const buildTablePanelButton = (label, title, cmd) => {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'ushio-table-panel-btn';
+  button.title = title;
+  button.textContent = label;
+  button.addEventListener('mousedown', (e) => e.preventDefault());
+  button.addEventListener('click', (e) => {
+    e.preventDefault();
+    executeCommand(cmd);
+    if (tableFloatingPanelElement) tableFloatingPanelElement.dataset.show = 'false';
+  });
+  return button;
+};
+
+const TABLE_ICONS = {
+  addRowBefore: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="7" x2="12" y2="13"></line><line x1="9" y1="10" x2="15" y2="10"></line><polyline points="8 3 12 3 12 7"></polyline><polyline points="16 3 12 3 12 7"></polyline><rect x="3" y="15" width="18" height="6" rx="1"></rect></svg>',
+  addRowAfter: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="17" x2="12" y2="11"></line><line x1="9" y1="14" x2="15" y2="14"></line><polyline points="8 21 12 21 12 17"></polyline><polyline points="16 21 12 21 12 17"></polyline><rect x="3" y="3" width="18" height="6" rx="1"></rect></svg>',
+  addColBefore: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="7" y1="12" x2="13" y2="12"></line><line x1="10" y1="9" x2="10" y2="15"></line><polyline points="3 8 3 12 7 12"></polyline><polyline points="3 16 3 12 7 12"></polyline><rect x="15" y="3" width="6" height="18" rx="1"></rect></svg>',
+  addColAfter: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="17" y1="12" x2="11" y2="12"></line><line x1="14" y1="9" x2="14" y2="15"></line><polyline points="21 8 21 12 17 12"></polyline><polyline points="21 16 21 12 17 12"></polyline><rect x="3" y="3" width="6" height="18" rx="1"></rect></svg>',
+  deleteRow: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="12" x2="20" y2="12"></line><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>',
+  deleteCol: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="4" x2="12" y2="20"></line><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>',
+  deleteSelected: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>',
+  prevCell: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>',
+  nextCell: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>',
+};
+
+const buildTablePanelIconButton = (icon, title, cmd) => {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'ushio-table-panel-btn';
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.innerHTML = icon;
+  button.addEventListener('mousedown', (e) => e.preventDefault());
+  button.addEventListener('click', (e) => {
+    e.preventDefault();
+    executeCommand(cmd);
+    if (tableFloatingPanelElement) tableFloatingPanelElement.dataset.show = 'false';
+  });
+  return button;
+};
+
+const buildTableFloatingPanel = () => {
+  const panel = document.createElement('div');
+  panel.className = 'ushio-table-panel';
+  panel.dataset.show = 'false';
+  panel.append(
+    buildTablePanelIconButton(TABLE_ICONS.addRowBefore, '在上方插入行', 'table_add_row_before'),
+    buildTablePanelIconButton(TABLE_ICONS.addRowAfter, '在下方插入行', 'table_add_row_after'),
+    buildTablePanelIconButton(TABLE_ICONS.addColBefore, '在左侧插入列', 'table_add_col_before'),
+    buildTablePanelIconButton(TABLE_ICONS.addColAfter, '在右侧插入列', 'table_add_col_after'),
+    buildTablePanelIconButton(TABLE_ICONS.deleteRow, '删除当前行', 'table_delete_row'),
+    buildTablePanelIconButton(TABLE_ICONS.deleteCol, '删除当前列', 'table_delete_col'),
+    buildTablePanelIconButton(TABLE_ICONS.deleteSelected, '删除选中单元格', 'table_delete_selected'),
+  );
+  return panel;
+};
+
+const hideTableFloatingUi = () => {
+  if (tableFloatingButtonElement) tableFloatingButtonElement.dataset.show = 'false';
+  if (tableFloatingPanelElement) tableFloatingPanelElement.dataset.show = 'false';
+};
+
+const getKeyboardInset = () => {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue('--ushio-keyboard-inset');
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+};
+
+const updateTableFloatingUiPosition = (table) => {
+  if (!tableFloatingButtonElement || !tableFloatingPanelElement) return;
+  if (!table || currentReadOnly) {
+    hideTableFloatingUi();
+    return;
+  }
+  const appRect = app.getBoundingClientRect();
+  const tableRect = table.getBoundingClientRect();
+  const baseLeft = tableRect.left - appRect.left + 6;
+  const baseTop = tableRect.top - appRect.top + 6;
+  const minMargin = 8;
+  const keyboardInset = getKeyboardInset();
+
+  const buttonWidth = tableFloatingButtonElement.offsetWidth || 72;
+  const buttonHeight = tableFloatingButtonElement.offsetHeight || 36;
+  const panelWidth = tableFloatingPanelElement.offsetWidth || 280;
+  const panelHeight = tableFloatingPanelElement.offsetHeight || 160;
+
+  const maxButtonLeft = Math.max(minMargin, appRect.width - buttonWidth - minMargin);
+  const maxButtonTop = Math.max(minMargin, appRect.height - keyboardInset - buttonHeight - minMargin);
+  const clampedButtonLeft = Math.min(Math.max(baseLeft, minMargin), maxButtonLeft);
+  const clampedButtonTop = Math.min(Math.max(baseTop, minMargin), maxButtonTop);
+
+  tableFloatingButtonElement.style.left = `${clampedButtonLeft}px`;
+  tableFloatingButtonElement.style.top = `${clampedButtonTop}px`;
+  tableFloatingButtonElement.dataset.show = 'true';
+
+  const panelBaseTop = clampedButtonTop + buttonHeight + 8;
+  const maxPanelLeft = Math.max(minMargin, appRect.width - panelWidth - minMargin);
+  const maxPanelTop = Math.max(minMargin, appRect.height - keyboardInset - panelHeight - minMargin);
+  const clampedPanelLeft = Math.min(Math.max(clampedButtonLeft, minMargin), maxPanelLeft);
+  const clampedPanelTop = Math.min(Math.max(panelBaseTop, minMargin), maxPanelTop);
+  tableFloatingPanelElement.style.left = `${clampedPanelLeft}px`;
+  tableFloatingPanelElement.style.top = `${clampedPanelTop}px`;
+};
+
+const findCurrentTable = (sourceNode = null) => {
+  const fromSource = sourceNode?.closest?.('table');
+  if (fromSource) return fromSource;
+  const selection = window.getSelection();
+  const anchorNode = selection?.anchorNode;
+  if (!anchorNode) return null;
+  const anchorElement = anchorNode instanceof Element ? anchorNode : anchorNode.parentElement;
+  return anchorElement?.closest?.('table') ?? null;
+};
+
+const syncTableFloatingUi = (sourceNode = null) => {
+  const table = findCurrentTable(sourceNode);
+  updateTableFloatingUiPosition(table);
+};
+
+let syncTableFloatingUiScheduled = false;
+const scheduleSyncTableFloatingUi = (sourceNode = null) => {
+  if (syncTableFloatingUiScheduled) return;
+  if (!tableFloatingButtonElement || !tableFloatingPanelElement) return;
+  if (currentReadOnly) {
+    hideTableFloatingUi();
+    return;
+  }
+  syncTableFloatingUiScheduled = true;
+  window.requestAnimationFrame(() => {
+    syncTableFloatingUiScheduled = false;
+    syncTableFloatingUi(sourceNode);
+  });
+};
+
+const createContextMenuElement = () => {
+  const element = document.createElement('div');
+  element.className = 'ushio-context-menu';
+
+  const CONTEXT_MENU_ICONS = {
+    bold: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"></path><path d="M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"></path></svg>',
+    italic: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="4" x2="10" y2="4"></line><line x1="14" y1="20" x2="5" y2="20"></line><line x1="15" y1="4" x2="9" y2="20"></line></svg>',
+    strikethrough: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="12" x2="20" y2="12"></line><path d="M17.5 7.5c-.7-1-1.8-1.5-3-1.5-2.5 0-4 1.5-4 3.5 0 1 .4 2 1.5 2.5"></path><path d="M8.5 14c.5.7 1.3 1 2.5 1 2 0 3.5-1 3.5-3 0-.7-.3-1.3-1-2"></path></svg>',
+    inlineCode: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>',
+    link: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>',
+    image: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>',
+    addRowBefore: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>',
+    deleteRow: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"></line><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>',
+    addColBefore: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>',
+    deleteCol: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>',
+    deleteSelected: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>',
+  };
+
+  const appendIconButton = (icon, title, cmd, args = null, className = '') => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `ushio-float-btn ${className}`.trim();
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+    btn.innerHTML = icon;
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      executeCommand(cmd, args ?? {});
+    });
+    element.append(btn);
+  };
+
+  appendIconButton(CONTEXT_MENU_ICONS.bold, '加粗', 'toggle_bold', null, 'ushio-context-btn');
+  appendIconButton(CONTEXT_MENU_ICONS.italic, '斜体', 'toggle_italic', null, 'ushio-context-btn');
+  appendIconButton(CONTEXT_MENU_ICONS.strikethrough, '删除线', 'toggle_strikethrough', null, 'ushio-context-btn');
+  appendIconButton(CONTEXT_MENU_ICONS.inlineCode, '行内代码', 'toggle_inline_code', null, 'ushio-context-btn');
+  appendIconButton(CONTEXT_MENU_ICONS.link, '链接', 'toggle_link', { href: 'https://' }, 'ushio-context-btn');
+  appendIconButton(CONTEXT_MENU_ICONS.image, '插入图片', 'insert_image_prompt', null, 'ushio-context-btn');
+  appendIconButton(CONTEXT_MENU_ICONS.addRowBefore, '表格：上方加行', 'table_add_row_before', null, 'ushio-context-btn is-table-only');
+  appendIconButton(CONTEXT_MENU_ICONS.deleteRow, '表格：删行', 'table_delete_row', null, 'ushio-context-btn is-table-only');
+  appendIconButton(CONTEXT_MENU_ICONS.addColBefore, '表格：左侧加列', 'table_add_col_before', null, 'ushio-context-btn is-table-only');
+  appendIconButton(CONTEXT_MENU_ICONS.deleteCol, '表格：删列', 'table_delete_col', null, 'ushio-context-btn is-table-only');
+  appendIconButton(CONTEXT_MENU_ICONS.deleteSelected, '表格：删除选中单元格', 'table_delete_selected', null, 'ushio-context-btn is-table-only');
+  return element;
+};
+
+const hideContextMenu = () => {
+  if (!contextMenuElement) return;
+  contextMenuElement.dataset.show = 'false';
+};
+
+const updateContextMenuForTarget = (target) => {
+  if (!contextMenuElement) return;
+  const inTable = Boolean(target?.closest?.('table'));
+  contextMenuElement.querySelectorAll('.is-table-only').forEach((button) => {
+    button.toggleAttribute('hidden', !inTable);
+  });
+};
+
+const showContextMenuAt = (clientX, clientY, target) => {
+  if (currentReadOnly || !contextMenuElement) return;
+  updateContextMenuForTarget(target);
+  contextMenuElement.dataset.show = 'true';
+  const appRect = app.getBoundingClientRect();
+  const menuWidth = contextMenuElement.offsetWidth || 240;
+  const menuHeight = contextMenuElement.offsetHeight || 160;
+  const keyboardInset =
+    Number.parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue('--ushio-keyboard-inset'),
+    ) || 0;
+  const maxLeft = Math.max(8, appRect.width - menuWidth - 8);
+  const maxTop = Math.max(8, appRect.height - menuHeight - keyboardInset - 8);
+  const left = Math.max(8, Math.min(clientX - appRect.left, maxLeft));
+  const top = Math.max(8, Math.min(clientY - appRect.top, maxTop));
+  contextMenuElement.style.left = `${left}px`;
+  contextMenuElement.style.top = `${top}px`;
+};
+
+// 真机实测：全量 querySelectorAll 清属性在 1359 块的文档上每次收尾要 204.7ms，
+// 而这个标记同一时刻只可能有一个元素。改成记住上一次标记的那个节点。
+let activeHintElement = null;
+
+const clearActiveMarkdownHints = () => {
+  if (!activeHintElement) return;
+  // 节点可能已被 ProseMirror 重建，对已脱离文档的节点 removeAttribute 无害。
+  activeHintElement.removeAttribute('data-ushio-active-node');
+  activeHintElement = null;
+};
+
+let editorFocusState = false;
+
+const emitEditorFocus = (focused) => {
+  const normalized = focused === true;
+  if (editorFocusState === normalized) return;
+  editorFocusState = normalized;
+  emit('on_editor_focus', { focused: normalized });
+};
+
+const updateActiveMarkdownHints = () => {
+  clearActiveMarkdownHints();
+  const root = app.querySelector('.milkdown .ProseMirror') || app.querySelector('.ProseMirror');
+  if (!root) return;
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount <= 0) return;
+  const anchorNode = selection.anchorNode;
+  if (!anchorNode || !root.contains(anchorNode)) return;
+  const anchorElement = anchorNode instanceof Element ? anchorNode : anchorNode.parentElement;
+  const active = anchorElement?.closest?.('h1, h2, h3, h4, h5, h6, blockquote, li, pre');
+  if (active) {
+    active.setAttribute('data-ushio-active-node', 'true');
+    activeHintElement = active;
+  }
+};
+
+// selectionchange 触发非常频繁（打字、组合输入、滚动选区），
+// 用 rAF 合并，把 querySelectorAll + 属性增删降到每帧最多一次。
+let activeHintsRafId = null;
+const scheduleActiveMarkdownHints = () => {
+  if (activeHintsRafId != null) return;
+  activeHintsRafId = requestAnimationFrame(() => {
+    activeHintsRafId = null;
+    const h0 = perfNow();
+    updateActiveMarkdownHints();
+    perfNoteHint(perfNow() - h0);
+  });
+};
+
+const blurEditorFocus = () => {
+  const editor = app.querySelector('.ProseMirror');
+  if (!(editor instanceof HTMLElement)) return false;
+
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  if (activeElement?.closest('.ProseMirror')) {
+    activeElement.blur();
+  }
+
+  const focusedCodeContent = app.querySelector('.ProseMirror .cm-editor.cm-focused .cm-content');
+  if (focusedCodeContent instanceof HTMLElement) {
+    focusedCodeContent.blur();
+  }
+
+  editor.blur();
+
+  const stillFocusedInEditor =
+    document.activeElement instanceof HTMLElement &&
+    Boolean(document.activeElement.closest('.ProseMirror'));
+  if (stillFocusedInEditor) {
+    app.setAttribute('tabindex', '-1');
+    app.focus({ preventScroll: true });
+  }
+
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  emitEditorFocus(false);
+  return true;
+};
+
+const createEditor = async () => {
+  const bootSec = perfStartSections();
+  // Pre-process: wrap HTML blocks as code fences, then resolve image URLs
+  const htmlWrappedMarkdown = wrapHtmlBlocksInCodeFence(currentMarkdown);
+  bootSec.mark('wrapHtmlMs');
+  const preprocessedInitialMarkdown = preprocessImages(htmlWrappedMarkdown);
+  bootSec.mark('preprocessImagesMs');
+  const fullSourceMarkdown = currentMarkdown;
+
+  // 大文档先只解析首块，避免 createEditor 阶段同步解析全文导致首帧卡死。
+  let initialCrepeMarkdown = preprocessedInitialMarkdown;
+  if (preprocessedInitialMarkdown.length > PROGRESSIVE_RENDER_THRESHOLD_CHARS) {
+    const target = Math.min(preprocessedInitialMarkdown.length, 2048);
+    let end = preprocessedInitialMarkdown.indexOf('\n', target);
+    if (end < 0 || end > target + 4096) end = target;
+    initialCrepeMarkdown = preprocessedInitialMarkdown.slice(0, Math.max(1, end));
+  }
+  bootSec.mark('sliceInitialMs');
+  
+  // Get the effective CodeMirror theme
+  const codeBlockTheme = getEffectiveCodeBlockTheme();
+  bootSec.mark('themeMs');
+  
+  const crepe = new Crepe({
+    root: app,
+    defaultValue: initialCrepeMarkdown,
+    features: {
+      [Crepe.Feature.BlockEdit]: false,
+      [Crepe.Feature.Toolbar]: false,
+      [Crepe.Feature.LinkTooltip]: false,
+    },
+    featureConfigs: {
+      [Crepe.Feature.CodeMirror]: codeBlockTheme ? { theme: codeBlockTheme } : {},
+    },
+  });
+  bootSec.mark('crepeCtorMs');
+  crepe.editor
+    .config(nord)
+    .config((ctx) => {
+      ctx.get(listenerCtx).markdownUpdated((_ctx, markdown, prev) => {
+        if (initializingEditor) markEditorInitializing();
+        if (markdown === prev) return;
+        if (!isApplyingFromFlutter && !initializingEditor) {
+          cancelProgressiveRender();
+        }
+        const perfT0 = perfNow();
+        const sanitizedMarkdown = stripGhostCodeLanguageMarkers(markdown);
+        const perfT1 = perfNow();
+        if (sanitizedMarkdown !== markdown) {
+          const perfWrap0 = perfNow();
+          const wrappedMarkdown = wrapHtmlBlocksInCodeFence(sanitizedMarkdown);
+          const perfPre0 = perfNow();
+          const renderReadyMarkdown = preprocessImages(wrappedMarkdown);
+          const perfPre1 = perfNow();
+          const perfRebuild0 = perfNow();
+          currentMarkdown = renderReadyMarkdown;
+          if (!currentReadOnly && !isApplyingFromFlutter && !initializingEditor) {
+            documentEdited = true;
+            scheduleContentChange(sanitizedMarkdown, { mode: 'code_sanitized' });
+          }
+          isApplyingFromFlutter = true;
+          editorInstance?.action(replaceAll(renderReadyMarkdown));
+          const perfRebuild1 = perfNow();
+          perfRecordChain({
+            serializeChars: markdown.length,
+            stripMs: perfT1 - perfT0,
+            wrapMs: perfPre0 - perfWrap0,
+            preImgMs: perfPre1 - perfPre0,
+            rebuildMs: perfRebuild1 - perfRebuild0,
+            totalMs: perfRebuild1 - perfT0,
+            sanitizeHit: 1,
+            fullRebuild: 1,
+          }, perfSizes());
+          if (!progressiveRenderPending) notifyRenderComplete();
+          return;
+        }
+        const perfWrap2 = perfNow();
+        const preWrappedMarkdown = wrapHtmlBlocksInCodeFence(sanitizedMarkdown);
+        const perfPre2 = perfNow();
+        currentMarkdown = preprocessImages(preWrappedMarkdown);
+        const perfPre3 = perfNow();
+        perfRecordChain({
+          serializeChars: markdown.length,
+          stripMs: perfT1 - perfT0,
+          wrapMs: perfPre2 - perfWrap2,
+          preImgMs: perfPre3 - perfPre2,
+          rebuildMs: 0,
+          totalMs: perfPre3 - perfT0,
+          sanitizeHit: 0,
+          fullRebuild: 0,
+        }, perfSizes());
+        if (!isApplyingFromFlutter && !initializingEditor) {
+          documentEdited = true;
+          scheduleContentChange(sanitizedMarkdown);
+        }
+        if (!progressiveRenderPending) {
+          isApplyingFromFlutter = false;
+        }
+        if (!progressiveRenderPending) notifyRenderComplete();
+      });
+      ctx.set(highlightPluginConfig.key, {
+        parser: highlightParser,
+      });
+      ctx.update(uploadConfig.key, (prev) => ({
+        ...prev,
+        uploader: (files, schema) => customUploadHandler(files, schema),
+      }));
+    })
+    .use(automd)
+    .use([emojiAttr, remarkEmojiPlugin, emojiSchema])
+    .use([remarkHtmlBlockFence, ushioHtmlBlockSchema])
+    // 覆盖同名 schema：修 round-trip 改写（图片 alt、列表紧凑度与起始号）。
+    // Crepe 的特性在构造函数里就注册完了，这里的后注册才会生效。
+    .use([ushioBulletListSchema, ushioOrderedListSchema, ushioListItemSchema, ushioImageBlockSchema])
+    // 代码块先进 <pre> 占位，进入视口/被点按才建 Crepe 的 CodeMirror 节点视图。
+    .use(lazyCodeBlockView)
+    .use(highlight)
+    .use(math)
+    .use(cursor)
+    .use(upload)
+    .use(searchHighlightProsePlugin);
+  bootSec.mark('pluginSetupMs');
+
+  const bootPhases = perfStartBootPhases();
+  const perfCreate0 = perfNow();
+  await crepe.create();
+  const bootPhaseReport = bootPhases.report();
+  bootSec.mark('crepeCreateMs');
+  const bootSections = bootSec.report();
+  perfStart();
+  const bootReport = {
+    crepeCreateMs: perfNow() - perfCreate0,
+    longFrameObserver: perfObserveFrames(),
+    sourceChars: preprocessedInitialMarkdown.length,
+    fullChars: fullSourceMarkdown.length,
+    progressive: preprocessedInitialMarkdown.length > PROGRESSIVE_RENDER_THRESHOLD_CHARS ? 1 : 0,
+    bootSections,
+    bootPhases: bootPhaseReport,
+  };
+  perfSetBoot(bootReport);
+  perfRecordEvent('boot', bootReport);
+  crepeInstance = crepe;
+  crepe.setReadonly(currentReadOnly);
+  applyReadOnlyState();
+  editorInstance = crepe.editor;
+
+  contextMenuElement = createContextMenuElement();
+  app.append(contextMenuElement);
+  tableFloatingButtonElement = buildTableFloatingButton();
+  tableFloatingPanelElement = buildTableFloatingPanel();
+  app.append(tableFloatingButtonElement);
+  app.append(tableFloatingPanelElement);
+  if (preprocessedInitialMarkdown.length > PROGRESSIVE_RENDER_THRESHOLD_CHARS) {
+    setMarkdown(fullSourceMarkdown, { forceRender: true });
+  } else {
+    notifyRenderComplete();
+  }
+  emit('on_ready', {
+    runtimeTag: RUNTIME_BUILD_TAG,
+  });
+};
+
+app.addEventListener('click', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (isImageInteractionTarget(target)) {
+    const img = target?.closest?.('img') || target?.querySelector?.('img');
+    if (img instanceof HTMLImageElement) {
+      const src = img.getAttribute('src') || '';
+      const alt = img.getAttribute('alt') || '';
+      const resolvedSrc = img.getAttribute('data-ushio-src') || src;
+      emit('on_image_click', {
+        src: resolvedSrc,
+        alt: alt,
+      });
+      return;
+    }
+    // Fallback: blur editor
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    blurEditorFocus();
+    return;
+  }
+  // Allow interactive elements inside HTML blocks to function natively
+  // (details/summary toggle, button clicks, form inputs, etc.)
+  if (target?.closest('.ushio-html-block, .ushio-html-inline')) {
+    const interactiveSelector = 'details, summary, button, input, select, textarea, label';
+    if (target?.matches(interactiveSelector) || target?.closest(interactiveSelector)) {
+      event.stopPropagation();
+      // Let native behavior happen (e.g., details/summary toggle)
+      return;
+    }
+    // Links inside HTML blocks should still be handled by our link handler below
+  }
+  const checkbox = target?.closest('input[type="checkbox"]');
+  if (checkbox instanceof HTMLInputElement) {
+    event.preventDefault();
+    event.stopPropagation();
+    // DEBUG: Log checkbox click
+    emitDebug(`[CHECKBOX CLICK] native checkbox found, readOnly=${currentReadOnly}`);
+    if (!currentReadOnly) {
+      guardEditorFocusAfterCheckboxToggle();
+      suppressNextCaretViewportSync = true;
+      checkbox.checked = !checkbox.checked;
+      emitCheckboxToggle(checkbox, checkbox.checked);
+      setTimeout(() => {
+        suppressNextCaretViewportSync = false;
+      }, 0);
+    }
+    return;
+  }
+  // Handle Milkdown custom checkbox component (.label-wrapper inside .milkdown-list-item-block)
+  const milkdownLabelWrapper = target?.closest('.milkdown-list-item-block .label-wrapper');
+  if (milkdownLabelWrapper) {
+    event.preventDefault();
+    event.stopPropagation();
+    emitDebug(`[CHECKBOX CLICK] Milkdown label-wrapper clicked, readOnly=${currentReadOnly}`);
+    // The Vue component handles the toggle internally, we just need to prevent IME
+    guardEditorFocusAfterCheckboxToggle();
+    return;
+  }
+  if (target?.matches('a, a *')) {
+    app.querySelector('.ProseMirror')?.blur();
+  }
+  const anchor = target?.closest('a');
+  if (anchor) {
+    event.preventDefault();
+    // On touch devices (no hover capability), first tap shows the link tooltip
+    // with actions (open, edit, copy). Second tap on the same link navigates.
+    // On desktop, tooltip is shown via mouseover so click navigates directly.
+    const isTouchDevice = !window.matchMedia('(hover: hover)').matches;
+    if (isTouchDevice && linkTooltipAnchor !== anchor) {
+      showLinkTooltip(anchor);
+      linkTooltipShownByTouch = true;
+      return; // Don't navigate on first tap on touch
+    }
+    if (isTouchDevice && linkTooltipShownByTouch) {
+      linkTooltipShownByTouch = false;
+      // Fall through to navigate on second tap
+    }
+    const rawHref = anchor.getAttribute('href') || '';
+    const resolvedHref = anchor.getAttribute('data-ushio-href') || resolveHref(rawHref);
+    const anchorText = anchor.textContent?.trim() || null;
+    const fallbackHref = !resolvedHref && !rawHref && anchorText ? `#${anchorText}` : '';
+    const finalHref = resolvedHref || rawHref || fallbackHref;
+
+    // Handle internal anchor links (#fragment) directly in JS for precise heading scroll,
+    // using the same toc_jump logic that the TOC panel uses (accurate positioning)
+    if (rawHref.startsWith('#') && !isExternalHref(finalHref)) {
+      let headingFragment = '';
+      try {
+        headingFragment = decodeURIComponent(rawHref.substring(1)).trim();
+      } catch (_) {
+        headingFragment = rawHref.substring(1).trim();
+      }
+      if (headingFragment) {
+        const headings = Array.from(
+          (app.querySelector('.milkdown .ProseMirror') || app).querySelectorAll('h1, h2, h3, h4, h5, h6'),
+        );
+        let targetHeading = null;
+        // Strategy 1: Match by heading slug (data-heading-slug)
+        const normalizedFragment = slugifyHeading(headingFragment);
+        for (const h of headings) {
+          if ((h.dataset.headingSlug || '') === normalizedFragment) {
+            targetHeading = h;
+            break;
+          }
+        }
+        // Strategy 2: Match by heading id
+        if (!targetHeading) {
+          targetHeading = headings.find((h) => h.id === headingFragment || h.id === `heading-line-${headingFragment}`);
+        }
+        // Strategy 3: Match by heading text
+        if (!targetHeading) {
+          targetHeading = headings.find((h) => slugifyHeading(h.textContent || '') === normalizedFragment);
+        }
+        if (targetHeading) {
+          scrollNodeToViewport(targetHeading, 32);
+          emitDebug(`[LINK CLICK] Internal anchor resolved to heading: "${targetHeading.textContent?.substring(0, 50)}"`);
+          return;
+        }
+      }
+      // Fallback: try to find by ID directly
+      const targetEl = document.getElementById(headingFragment);
+      if (targetEl) {
+        scrollNodeToViewport(targetEl, 32);
+        return;
+      }
+    }
+
+    // DEBUG: Log anchor link click details
+    emitDebug(`[LINK CLICK] rawHref="${rawHref}" resolvedHref="${resolvedHref}" finalHref="${finalHref}" text="${anchorText}"`);
+    emit('on_link_click', {
+      href: finalHref,
+      text: anchorText,
+      title: anchor.getAttribute('title'),
+      isExternal: isExternalHref(finalHref),
+    });
+    return;
+  }
+  if (!target?.closest('.ushio-table-fab, .ushio-table-panel')) {
+    if (tableFloatingPanelElement) {
+      tableFloatingPanelElement.dataset.show = 'false';
+    }
+  }
+  scheduleSyncTableFloatingUi(target);
+});
+
+// Link hover preview (desktop: mouseover, mobile: first tap shows tooltip)
+let linkTooltipShownByTouch = false;
+
+app.addEventListener('mouseover', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const anchor = target?.closest('a');
+  if (anchor && !currentReadOnly) {
+    showLinkTooltip(anchor);
+  }
+});
+
+app.addEventListener('mouseout', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const anchor = target?.closest('a');
+  if (anchor) {
+    const related = event.relatedTarget instanceof Element ? event.relatedTarget : null;
+    if (!related?.closest('.ushio-link-tooltip, a')) {
+      hideLinkTooltip();
+    }
+  }
+});
+
+app.addEventListener('pointerdown', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.closest('.ProseMirror')) markEditorInteraction();
+}, true);
+
+app.addEventListener('mousedown', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (isImageInteractionTarget(target)) {
+    return;
+  }
+  // Allow interactive elements inside HTML blocks to function normally
+  if (target?.closest('.ushio-html-block, .ushio-html-inline')) {
+    const interactiveSelector = 'details, summary, button, input, select, textarea, label, a';
+    if (target?.matches(interactiveSelector) || target?.closest(interactiveSelector)) {
+      event.stopPropagation();
+      return;
+    }
+  }
+  // Prevent ProseMirror from handling link clicks (we handle in 'click' event)
+  if (target?.matches('a, a *')) {
+    event.preventDefault();
+    return;
+  }
+  // Prevent ProseMirror from stealing focus on checkbox clicks
+  if (target?.matches('input[type="checkbox"], input[type="checkbox"] *')) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  if (target?.closest('.milkdown-list-item-block .label-wrapper')) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+});
+
+app.addEventListener('touchstart', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (isImageInteractionTarget(target)) {
+    suppressCaretViewportSync(1200);
+    return;
+  }
+  if (target?.matches('input[type="checkbox"], input[type="checkbox"] *')) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  // Handle Milkdown custom checkbox component
+  if (target?.closest('.milkdown-list-item-block .label-wrapper')) {
+    event.preventDefault();
+    event.stopPropagation();
+    emitDebug('[TOUCHSTART] Milkdown label-wrapper - preventing default');
+  }
+}, { passive: false });
+
+const emitCheckboxToggle = (checkbox, checked) => {
+  const index = Number.parseInt(checkbox.dataset.checkboxIndex || '-1', 10);
+  if (Number.isNaN(index) || index < 0) return;
+  emit('on_checkbox_toggle', {
+    index,
+    checked,
+  });
+};
+
+const isImageInteractionTarget = (target) => Boolean(
+  target?.closest?.('.milkdown-image-block, .milkdown-image-block *, img'),
+);
+
+app.addEventListener('pointerdown', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (isImageInteractionTarget(target)) {
+    suppressCaretViewportSync(1200);
+    return;
+  }
+  const checkbox = target?.closest('input[type="checkbox"]');
+  if (!(checkbox instanceof HTMLInputElement)) return;
+  event.preventDefault();
+  event.stopPropagation();
+});
+
+app.addEventListener('focusin', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.matches('input[type="checkbox"]')) {
+    target.blur();
+    return;
+  }
+  if (target?.closest('.ProseMirror')) {
+    if (Date.now() < checkboxInteractionGuardUntil) {
+      if (target instanceof HTMLElement) target.blur();
+      emitEditorFocus(false);
+      return;
+    }
+    if (suppressNextCaretViewportSync) return;
+    emitEditorFocus(true);
+    scheduleCaretIntoUpperViewport();
+  }
+});
+
+app.addEventListener('focusout', (event) => {
+  const next = event.relatedTarget instanceof Element ? event.relatedTarget : null;
+  if (next?.closest('.ProseMirror')) {
+    return;
+  }
+  const active = document.activeElement instanceof Element ? document.activeElement : null;
+  if (active?.closest('.ProseMirror')) {
+    return;
+  }
+  emitEditorFocus(false);
+});
+
+app.addEventListener('change', (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox') return;
+  event.preventDefault();
+  event.stopPropagation();
+});
+
+app.addEventListener('focusin', (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox') return;
+  target.blur();
+});
+
+app.addEventListener('contextmenu', (event) => {
+  if (currentReadOnly) return;
+  const target = event.target instanceof Element ? event.target : null;
+  const inEditor = Boolean(target?.closest('.ProseMirror'));
+  if (!inEditor) {
+    hideContextMenu();
+    return;
+  }
+  // 手指长按要留给 WebView 原生的选字菜单：在这里 preventDefault 会把系统
+  // 的选区手柄和「复制/全选」操作条一起掐掉，而原生菜单本来就分得清中英文词。
+  if (lastPointerType === 'touch') {
+    hideContextMenu();
+    return;
+  }
+  event.preventDefault();
+  showContextMenuAt(event.clientX, event.clientY, target);
+});
+
+app.addEventListener('pointerdown', (event) => {
+  lastPointerType = event.pointerType;
+  if (event.pointerType !== 'touch' || currentReadOnly) return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target?.closest('.ProseMirror')) return;
+  suppressCaretViewportSync(1200);
+  editorTouchTracking = { x: event.clientX, y: event.clientY };
+});
+
+app.addEventListener('pointermove', (event) => {
+  if (event.pointerType !== 'touch') return;
+  if (editorTouchTracking) {
+    const dragX = Math.abs(event.clientX - editorTouchTracking.x);
+    const dragY = Math.abs(event.clientY - editorTouchTracking.y);
+    if (dragX > 6 || dragY > 6) {
+      lastUserScrollAt = Date.now();
+      suppressCaretViewportSync(1400);
+    }
+  }
+});
+
+app.addEventListener('pointerup', (event) => {
+  if (event.pointerType === 'touch') {
+    editorTouchTracking = null;
+    suppressCaretViewportSync(1000);
+  }
+});
+app.addEventListener('pointercancel', (event) => {
+  if (event.pointerType === 'touch') {
+    editorTouchTracking = null;
+    suppressCaretViewportSync(1000);
+  }
+});
+document.addEventListener('scroll', () => {
+  // 光标避让自己滚出来的那一下不算用户滚动，否则会把下一次避让抑制掉
+  if (Date.now() - lastProgrammaticScrollAt >= 150) {
+    lastUserScrollAt = Date.now();
+    suppressCaretViewportSync(1000);
+  }
+  hideContextMenu();
+  hideLinkTooltip();
+}, true);
+
+// IME composition event handlers - prevent viewport sync during composition
+document.addEventListener('compositionstart', () => {
+  isComposing = true;
+}, true);
+document.addEventListener('compositionend', () => {
+  isComposing = false;
+  // 组合结束后立即同步一次光标位置，避免中文输入时光标被键盘遮挡
+  requestAnimationFrame(() => ensureCaretInUpperViewport());
+}, true);
+
+document.addEventListener('selectionchange', () => {
+  scheduleActiveMarkdownHints();
+  const active = document.activeElement instanceof Element ? document.activeElement : null;
+  if (active?.closest('.ProseMirror')) {
+    scheduleCaretIntoUpperViewport();
+  }
+}, true);
+document.addEventListener('selectionchange', () => scheduleSyncTableFloatingUi(), true);
+document.addEventListener('scroll', () => scheduleSyncTableFloatingUi(), true);
+document.addEventListener('pointerdown', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target?.closest('.ushio-context-menu')) {
+    hideContextMenu();
+  }
+  if (!target?.closest('.ushio-table-fab, .ushio-table-panel')) {
+    if (tableFloatingPanelElement) {
+      tableFloatingPanelElement.dataset.show = 'false';
+    }
+  }
+  if (!target?.closest('.ushio-link-tooltip')) {
+    hideLinkTooltip();
+  }
+});
+
+const ensureEditor = () => {
+  createEditorPromise ??= createEditor();
+  return createEditorPromise;
+};
+
+const handleEditorShortcut = (event) => {
+  if (currentReadOnly) return;
+  if (event.key === 'Escape') {
+    const focusedNode = document.activeElement instanceof Element ? document.activeElement : null;
+    if (focusedNode?.closest('.ProseMirror')) {
+      event.preventDefault();
+      blurEditorFocus();
+      return;
+    }
+  }
+  const key = (event.key || '').toLowerCase();
+  const withPrimary = event.metaKey || event.ctrlKey;
+  if (!withPrimary || event.altKey) return;
+
+  if (key === 'b') {
+    event.preventDefault();
+    executeCommand('toggle_bold');
+    return;
+  }
+  if (key === 'i') {
+    event.preventDefault();
+    executeCommand('toggle_italic');
+    return;
+  }
+  if (key === 'k') {
+    event.preventDefault();
+    executeCommand('toggle_link', { href: 'https://' });
+    return;
+  }
+  if (key === 'e') {
+    event.preventDefault();
+    executeCommand('toggle_inline_code');
+    return;
+  }
+  if (key === 'x' && event.shiftKey) {
+    event.preventDefault();
+    executeCommand('toggle_strikethrough');
+    return;
+  }
+  if (key === 'z') {
+    event.preventDefault();
+    executeCommand(event.shiftKey ? 'redo' : 'undo');
+    return;
+  }
+  if (key === 'y') {
+    event.preventDefault();
+    executeCommand('redo');
+    return;
+  }
+  if (key === '1' || key === '2' || key === '3') {
+    event.preventDefault();
+    executeCommand('set_heading', { level: Number.parseInt(key, 10) });
+    return;
+  }
+  if (key === '7' && event.shiftKey) {
+    event.preventDefault();
+    executeCommand('toggle_ordered_list');
+    return;
+  }
+  if (key === '8' && event.shiftKey) {
+    event.preventDefault();
+    executeCommand('toggle_bullet_list');
+    return;
+  }
+  if (key === '.' && event.shiftKey) {
+    event.preventDefault();
+    executeCommand('toggle_blockquote');
+    return;
+  }
+  if (key === 'm' && event.shiftKey) {
+    event.preventDefault();
+    executeCommand('insert_math_block');
+    return;
+  }
+};
+
+const emitCmdTelemetry = (cmd, ok, reason = null, durationMs = null) => {
+  emit('on_cmd_metric', {
+    cmd,
+    ok,
+    reason,
+    durationMs,
+  });
+  if (!ok) {
+    const key = `${cmd || 'unknown'}::${reason || 'unknown'}`;
+    const nextCount = (cmdFailureAggregate.get(key) ?? 0) + 1;
+    cmdFailureAggregate.set(key, nextCount);
+    emit('on_cmd_failure_aggregate', {
+      cmd: cmd || 'unknown',
+      reason: reason || 'unknown',
+      count: nextCount,
+    });
+  }
+};
+
+const emitCmdResult = (cmd, ok, reason = null, startedAt = null) => {
+  const durationMs = Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : null;
+  emit('on_cmd_result', {
+    cmd,
+    ok,
+    reason,
+  });
+  emitCmdTelemetry(cmd, ok, reason, durationMs);
+};
+
+const collectCodeBlockLanguageDebugReport = () => {
+  const codeBlocks = Array.from((app.querySelector('.milkdown .ProseMirror') || app).querySelectorAll('.milkdown-code-block'));
+  return codeBlocks.map((block, index) => {
+    const tools = block.querySelector('.tools');
+    const pre = block.querySelector('pre');
+    const languageButton = getCodeLanguageButton(block);
+    const blockRect = block.getBoundingClientRect();
+    const toolsRect = tools?.getBoundingClientRect?.();
+    const preComputed = pre ? window.getComputedStyle(pre) : null;
+    const beforeStyle = pre ? window.getComputedStyle(pre, '::before') : null;
+    const afterStyle = pre ? window.getComputedStyle(pre, '::after') : null;
+    const toolsStyle = tools ? window.getComputedStyle(tools) : null;
+    return {
+      index,
+      blockClass: block.className || '',
+      languageAttr: pre?.getAttribute('data-language') || '',
+      blockRect: {
+        top: Math.round(blockRect.top),
+        right: Math.round(blockRect.right),
+        bottom: Math.round(blockRect.bottom),
+        left: Math.round(blockRect.left),
+        width: Math.round(blockRect.width),
+        height: Math.round(blockRect.height),
+      },
+      toolsExists: Boolean(tools),
+      languageTriggerExists: Boolean(languageButton),
+      languageTriggerClass: languageButton?.className || '',
+      languageTriggerText: (languageButton?.textContent || '').trim(),
+      languageTriggerDataset: languageButton
+        ? {
+            hasLanguage: languageButton.dataset.hasLanguage || '',
+            language: languageButton.dataset.language || '',
+            rewired: languageButton.dataset.ushioLanguageRewired || '',
+            bound: languageButton.dataset.ushioLanguageBind || '',
+          }
+        : null,
+      toolsRect: toolsRect
+        ? {
+            top: Math.round(toolsRect.top),
+            right: Math.round(toolsRect.right),
+            bottom: Math.round(toolsRect.bottom),
+            left: Math.round(toolsRect.left),
+            width: Math.round(toolsRect.width),
+            height: Math.round(toolsRect.height),
+          }
+        : null,
+      toolsComputed: toolsStyle
+        ? {
+            position: toolsStyle.position,
+            top: toolsStyle.top,
+            right: toolsStyle.right,
+            bottom: toolsStyle.bottom,
+            left: toolsStyle.left,
+            transform: toolsStyle.transform,
+          }
+        : null,
+      preComputed: preComputed
+        ? {
+            position: preComputed.position,
+          }
+        : null,
+      preBefore: beforeStyle
+        ? {
+            content: beforeStyle.content,
+            display: beforeStyle.display,
+            top: beforeStyle.top,
+            right: beforeStyle.right,
+            bottom: beforeStyle.bottom,
+            left: beforeStyle.left,
+          }
+        : null,
+      preAfter: afterStyle
+        ? {
+            content: afterStyle.content,
+            display: afterStyle.display,
+            top: afterStyle.top,
+            right: afterStyle.right,
+            bottom: afterStyle.bottom,
+            left: afterStyle.left,
+          }
+        : null,
+    };
+  });
+};
+
+const executeCommand = (cmd, args = {}) => {
+  const startedAt = Date.now();
+  if (!editorInstance) {
+    emitCmdResult(cmd, false, 'editor_not_ready', startedAt);
+    return;
+  }
+  if (currentReadOnly && cmd !== 'focus_editor' && cmd !== 'blur_editor' && cmd !== 'debug_codeblock_language_report' && cmd !== 'scroll_caret_into_view' && cmd !== 'set_keyboard_metrics' && cmd !== 'dump_perf' && cmd !== 'set_perf_probe') {
+    emitCmdResult(cmd, false, 'readonly', startedAt);
+    return;
+  }
+  try {
+    if (cmd === 'dump_perf') {
+      perfDump();
+      emitCmdResult(cmd, true, null, startedAt);
+      return;
+    }
+    if (cmd === 'set_perf_probe') {
+      perfSetEnabled(args.enabled !== false);
+      emitCmdResult(cmd, true, null, startedAt);
+      return;
+    }
+    if (cmd === 'focus_editor') {
+      const pm = app.querySelector('.ProseMirror');
+      if (pm instanceof HTMLElement) {
+        pm.focus({ preventScroll: true });
+        emitDebug('[CMD] focus_editor: focused');
+        emitEditorFocus(true);
+      }
+      emitCmdResult(cmd, true, null, startedAt);
+      return;
+    }
+    if (cmd === 'blur_editor') {
+      const ok = blurEditorFocus();
+      emitCmdResult(cmd, ok, ok ? null : 'not_applicable', startedAt);
+      return;
+    }
+    if (cmd === 'set_keyboard_metrics') {
+      const keyboardInset = Number(args?.keyboardInset);
+      const toolbarHeight = Number(args?.toolbarHeight);
+      const headerHeight = Number(args?.headerHeight);
+      if (Number.isFinite(keyboardInset) && keyboardInset >= 0) {
+        flutterKeyboardInsetPx = keyboardInset;
+      }
+      if (Number.isFinite(toolbarHeight) && toolbarHeight >= 0) {
+        flutterToolbarHeightPx = toolbarHeight;
+      }
+      if (Number.isFinite(headerHeight) && headerHeight >= 0) {
+        flutterHeaderHeightPx = headerHeight;
+      }
+      updateViewportMetrics();
+      emitCmdResult(cmd, true, null, startedAt);
+      return;
+    }
+    if (cmd === 'scroll_caret_into_view') {
+      forceCaretIntoUpperViewport();
+      emitCmdResult(cmd, true, null, startedAt);
+      return;
+    }
+    if (cmd === 'debug_codeblock_language_report') {
+      const report = collectCodeBlockLanguageDebugReport();
+      emit('on_debug_report', {
+        kind: 'codeblock_language_marker',
+        source: typeof args?.source === 'string' ? args.source : 'unknown',
+        runtimeTag: RUNTIME_BUILD_TAG,
+        blockCount: report.length,
+        report,
+      });
+      emitCmdResult(cmd, true, null, startedAt);
+      return;
+    }
+    if (cmd === 'undo' || cmd === 'redo') {
+      let ok = false;
+      editorInstance.action((ctx) => {
+        const commands = ctx.get(commandsCtx);
+        ok = cmd === 'undo'
+          ? commands.call(undoCommand.key)
+          : commands.call(redoCommand.key);
+      });
+      emitCmdResult(cmd, ok, ok ? null : 'not_applicable', startedAt);
+      emitHistoryState();
+      return;
+    }
+    if (
+      cmd === 'toggle_bold' ||
+      cmd === 'toggle_italic' ||
+      cmd === 'toggle_strikethrough' ||
+      cmd === 'toggle_inline_code' ||
+      cmd === 'toggle_link' ||
+      cmd === 'set_heading' ||
+      cmd === 'toggle_blockquote' ||
+      cmd === 'toggle_bullet_list' ||
+      cmd === 'toggle_ordered_list' ||
+      cmd === 'insert_code_block' ||
+      cmd === 'insert_math_block' ||
+      cmd === 'insert_table' ||
+      cmd === 'insert_hr' ||
+      cmd === 'table_next_cell' ||
+      cmd === 'table_prev_cell' ||
+      cmd === 'table_add_row_before' ||
+      cmd === 'table_add_row_after' ||
+      cmd === 'table_add_col_before' ||
+      cmd === 'table_add_col_after' ||
+      cmd === 'table_delete_row' ||
+      cmd === 'table_delete_col' ||
+      cmd === 'table_delete_selected' ||
+      cmd === 'insert_image' ||
+      cmd === 'insert_emoji' ||
+      cmd === 'insert_image_prompt'
+    ) {
+      let ok = false;
+      let insertImagePromptRequestId = null;
+      let insertImagePromptTimeoutId = null;
+      editorInstance.action((ctx) => {
+        const commands = ctx.get(commandsCtx);
+        const view = ctx.get(editorViewCtx);
+        if (cmd === 'toggle_bold') {
+          ok = commands.call(toggleStrongCommand.key);
+          return;
+        }
+        if (cmd === 'toggle_italic') {
+          ok = commands.call(toggleEmphasisCommand.key);
+          return;
+        }
+        if (cmd === 'toggle_strikethrough') {
+          ok = commands.call(toggleStrikethroughCommand.key);
+          return;
+        }
+        if (cmd === 'toggle_inline_code') {
+          ok = commands.call(toggleInlineCodeCommand.key);
+          return;
+        }
+        if (cmd === 'toggle_link') {
+          const href = typeof args?.href === 'string' ? args.href.trim() : '';
+          const title = typeof args?.title === 'string' ? args.title.trim() : '';
+          ok = commands.call(toggleLinkCommand.key, {
+            href: href || 'https://',
+            title,
+          });
+          return;
+        }
+        if (cmd === 'set_heading') {
+          const levelRaw = Number.parseInt(args?.level, 10);
+          const level = Number.isNaN(levelRaw) ? 1 : Math.max(1, Math.min(levelRaw, 6));
+          ok = commands.call(wrapInHeadingCommand.key, level);
+          return;
+        }
+        if (cmd === 'toggle_blockquote') {
+          ok = commands.call(wrapInBlockquoteCommand.key);
+          return;
+        }
+        if (cmd === 'toggle_bullet_list') {
+          ok = commands.call(wrapInBulletListCommand.key);
+          return;
+        }
+        if (cmd === 'toggle_ordered_list') {
+          ok = commands.call(wrapInOrderedListCommand.key);
+          return;
+        }
+        if (cmd === 'insert_code_block') {
+          const language = typeof args?.language === 'string' ? args.language.trim() : '';
+          ok = commands.call(createCodeBlockCommand.key, language || undefined);
+          return;
+        }
+        if (cmd === 'insert_math_block') {
+          insertTextAtSelection(view, '$$\n\n$$');
+          ok = true;
+          return;
+        }
+        if (cmd === 'insert_hr') {
+          ok = commands.call(insertHrCommand.key);
+          return;
+        }
+        if (cmd === 'insert_table') {
+          const row = Number.parseInt(args?.row, 10);
+          const col = Number.parseInt(args?.col, 10);
+          ok = commands.call(insertTableCommand.key, {
+            row: Number.isNaN(row) || row <= 0 ? 3 : row,
+            col: Number.isNaN(col) || col <= 0 ? 3 : col,
+          });
+          return;
+        }
+        if (cmd === 'table_next_cell') {
+          ok = commands.call(goToNextTableCellCommand.key);
+          return;
+        }
+        if (cmd === 'table_prev_cell') {
+          ok = commands.call(goToPrevTableCellCommand.key);
+          return;
+        }
+        if (cmd === 'table_add_row_before') {
+          ok = commands.call(addRowBeforeCommand.key);
+          return;
+        }
+        if (cmd === 'table_add_row_after') {
+          ok = commands.call(addRowAfterCommand.key);
+          return;
+        }
+        if (cmd === 'table_add_col_before') {
+          ok = commands.call(addColBeforeCommand.key);
+          return;
+        }
+        if (cmd === 'table_add_col_after') {
+          ok = commands.call(addColAfterCommand.key);
+          return;
+        }
+        if (cmd === 'table_delete_selected') {
+          ok = commands.call(deleteSelectedCellsCommand.key);
+          return;
+        }
+        if (cmd === 'table_delete_row') {
+          const { state, dispatch } = view;
+          ok = isInTable(state) ? deleteRow(state, dispatch) : false;
+          return;
+        }
+        if (cmd === 'table_delete_col') {
+          const { state, dispatch } = view;
+          ok = isInTable(state) ? deleteColumn(state, dispatch) : false;
+          return;
+        }
+        if (cmd === 'insert_image') {
+          const src = resolveInsertImageSrc(args?.src);
+          if (!src) {
+            ok = false;
+            return;
+          }
+          const alt = typeof args?.alt === 'string' ? args.alt : '';
+          ok = commands.call(insertImageCommand.key, { src, alt });
+          return;
+        }
+        if (cmd === 'insert_emoji') {
+          const emojiText = typeof args?.emoji === 'string' ? args.emoji : '😀';
+          insertTextAtSelection(view, emojiText || '😀');
+          ok = true;
+          return;
+        }
+        if (cmd === 'insert_image_prompt') {
+          insertImagePromptRequestId = nextRequestId();
+          insertImagePromptTimeoutId = setTimeout(() => {
+            const pending = pendingUploadResolvers.get(insertImagePromptRequestId);
+            if (!pending) return;
+            pendingUploadResolvers.delete(insertImagePromptRequestId);
+            pending.reject(new Error('insert_image_timeout'));
+          }, 120000);
+          pendingUploadResolvers.set(insertImagePromptRequestId, {
+            resolve: (result) => {
+              if (insertImagePromptTimeoutId != null) {
+                clearTimeout(insertImagePromptTimeoutId);
+              }
+              const images = Array.isArray(result?.images) ? result.images : [];
+              const item = images.find((x) => typeof x?.src === 'string' && x.src.trim().length > 0);
+              if (!item) {
+                emitCmdResult(cmd, false, 'insert_image_cancelled_or_invalid', startedAt);
+                return;
+              }
+              const src = resolveInsertImageSrc(item.src);
+              if (!src) {
+                emitCmdResult(cmd, false, 'insert_image_invalid_src', startedAt);
+                return;
+              }
+              const alt = typeof item.alt === 'string' ? item.alt : '';
+              let inserted = false;
+              editorInstance.action((innerCtx) => {
+                const innerCommands = innerCtx.get(commandsCtx);
+                inserted = innerCommands.call(insertImageCommand.key, { src, alt });
+              });
+              emitCmdResult(cmd, inserted, inserted ? null : 'not_applicable', startedAt);
+              if (inserted) {
+                notifyRenderComplete();
+              }
+            },
+            reject: (error) => {
+              if (insertImagePromptTimeoutId != null) {
+                clearTimeout(insertImagePromptTimeoutId);
+              }
+              emitCmdResult(cmd, false, String(error?.message || 'insert_image_failed'), startedAt);
+            },
+          });
+          emit('on_insert_image_request', { requestId: insertImagePromptRequestId });
+          return;
+        }
+      });
+      if (cmd === 'insert_image_prompt') {
+        return;
+      }
+      emitCmdResult(
+        cmd,
+        ok,
+        ok
+          ? null
+          : (cmd === 'insert_image' || cmd === 'insert_image_prompt')
+            ? 'invalid_args_or_not_applicable'
+            : 'not_applicable',
+        startedAt,
+      );
+      if (ok) {
+        notifyRenderComplete();
+      }
+      return;
+    }
+
+    // Define search highlight functions BEFORE they are used
+    const dispatchSearchDecorations = (deco) => {
+      if (!editorInstance) return;
+      editorInstance.action((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        view.dispatch(view.state.tr.setMeta(searchHighlightPluginKey, deco));
+      });
+    };
+
+    const clearSearchHighlights = () => {
+      searchHighlightRanges = [];
+      searchHighlightActiveIndex = -1;
+      dispatchSearchDecorations(DecorationSet.empty);
+    };
+
+    const highlightSearchMatches = (query, options = {}) => {
+      clearSearchHighlights();
+      if (!query || typeof query !== 'string' || !query.trim()) return;
+      if (!editorInstance) return;
+
+      const trimmedQuery = query.trim();
+      if (!trimmedQuery) return;
+
+      const caseSensitive = options.caseSensitive === true;
+      const wholeWord = options.wholeWord === true;
+      const useRegex = options.useRegex === true;
+
+      // Build match function based on options
+      const findMatches = (text) => {
+        const matches = [];
+
+        if (useRegex) {
+          // Regular expression search
+          try {
+            const regex = new RegExp(trimmedQuery, caseSensitive ? 'g' : 'gi');
+            let match;
+            while ((match = regex.exec(text)) !== null) {
+              matches.push({ start: match.index, end: match.index + match[0].length });
+            }
+          } catch (e) {
+            // Invalid regex
+          }
+        } else if (wholeWord) {
+          // Whole word matching
+          try {
+            const wordPattern = new RegExp(
+              '\\b' + trimmedQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b',
+              caseSensitive ? 'g' : 'gi'
+            );
+            let match;
+            while ((match = wordPattern.exec(text)) !== null) {
+              matches.push({ start: match.index, end: match.index + match[0].length });
+            }
+          } catch (e) {
+            // Invalid pattern (e.g., query ends with backslash)
+          }
+        } else {
+          // Standard substring search
+          const searchText = caseSensitive ? text : text.toLowerCase();
+          const searchQuery = caseSensitive ? trimmedQuery : trimmedQuery.toLowerCase();
+          let from = 0;
+          while (from < searchText.length) {
+            const idx = searchText.indexOf(searchQuery, from);
+            if (idx < 0) break;
+            matches.push({ start: idx, end: idx + searchQuery.length });
+            from = idx + searchQuery.length;
+          }
+        }
+
+        return matches;
+      };
+
+      editorInstance.action((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        const doc = view.state.doc;
+        const ranges = [];
+        doc.descendants((node, pos) => {
+          if (!node.isText) return;
+          const text = node.text || '';
+          findMatches(text).forEach(({ start, end }) => {
+            ranges.push({ from: pos + start, to: pos + end });
+          });
+        });
+
+        const decorations = ranges.map(({ from, to }) =>
+          Decoration.inline(from, to, {
+            class: 'ushio-search-highlight',
+          })
+        );
+        const deco = DecorationSet.create(doc, decorations);
+        searchHighlightRanges = ranges;
+        searchHighlightActiveIndex = -1;
+        view.dispatch(view.state.tr.setMeta(searchHighlightPluginKey, deco));
+      });
+    };
+
+    const highlightSearchActive = (index) => {
+      if (!editorInstance || index < 0) return;
+      searchHighlightActiveIndex = index;
+      editorInstance.action((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        const decorations = searchHighlightRanges.map(({ from, to }, i) =>
+          Decoration.inline(from, to, {
+            class:
+              i === index
+                ? 'ushio-search-highlight ushio-search-highlight-active'
+                : 'ushio-search-highlight',
+          })
+        );
+        const deco = DecorationSet.create(view.state.doc, decorations);
+        view.dispatch(view.state.tr.setMeta(searchHighlightPluginKey, deco));
+      });
+    };
+
+    if (cmd === 'search_jump') {
+      const query = typeof args?.query === 'string' ? args.query.trim() : '';
+      const occurrenceRaw = Number.parseInt(args?.occurrence, 10);
+      const occurrence = Number.isNaN(occurrenceRaw) ? 0 : occurrenceRaw;
+      if (!query) {
+        emitCmdResult(cmd, false, 'invalid_args', startedAt);
+        return;
+      }
+      const root = app.querySelector('.milkdown .ProseMirror') || app.querySelector('.ProseMirror');
+      if (!root) {
+        emitCmdResult(cmd, false, 'editor_not_ready', startedAt);
+        return;
+      }
+      const lowerQuery = query.toLowerCase();
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const ranges = [];
+      while (walker.nextNode()) {
+        const textNode = walker.currentNode;
+        const text = textNode?.textContent ?? '';
+        const lowerText = text.toLowerCase();
+        let from = 0;
+        while (from < lowerText.length) {
+          const idx = lowerText.indexOf(lowerQuery, from);
+          if (idx < 0) break;
+          const range = document.createRange();
+          range.setStart(textNode, idx);
+          range.setEnd(textNode, idx + query.length);
+          ranges.push(range);
+          from = idx + query.length;
+        }
+      }
+      if (!ranges.length) {
+        emitCmdResult(cmd, false, 'not_found', startedAt);
+        return;
+      }
+      const targetIndex = Math.max(0, Math.min(ranges.length - 1, occurrence));
+      const target = ranges[targetIndex];
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(target);
+      const node = target.startContainer.parentElement ?? target.commonAncestorContainer.parentElement;
+      scrollNodeToViewport(node, Number.parseFloat(args?.topOffset) || 32);
+      emitCmdResult(cmd, true, null, startedAt);
+      highlightSearchActive(occurrence);
+      return;
+    }
+
+    if (cmd === 'search_highlight') {
+      const query = typeof args?.query === 'string' ? args.query.trim() : '';
+      const options = {
+        caseSensitive: args?.caseSensitive === true,
+        wholeWord: args?.wholeWord === true,
+        useRegex: args?.useRegex === true,
+      };
+      highlightSearchMatches(query, options);
+      emitCmdResult(cmd, true, null, startedAt);
+      return;
+    }
+
+    if (cmd === 'search_clear') {
+      clearSearchHighlights();
+      emitCmdResult(cmd, true, null, startedAt);
+      return;
+    }
+
+    if (cmd === 'toc_jump') {
+      const headingText = typeof args?.headingText === 'string' ? args.headingText.trim() : '';
+      const headingSlug = typeof args?.headingSlug === 'string' ? args.headingSlug.trim() : '';
+      const lineNumberRaw = Number.parseInt(args?.lineNumber, 10);
+      const headingIndexRaw = Number.parseInt(args?.headingIndex, 10);
+      const topOffsetRaw = Number.parseFloat(args?.topOffset);
+      const topOffset = Number.isFinite(topOffsetRaw) ? topOffsetRaw : 32;
+      const headings = Array.from(
+        (app.querySelector('.milkdown .ProseMirror') || app).querySelectorAll('h1, h2, h3, h4, h5, h6'),
+      );
+      
+      // DEBUG: Log TOC jump parameters
+      emitDebug(`[TOC JUMP] headingText="${headingText}" headingSlug="${headingSlug}" lineNumber=${lineNumberRaw} headingIndex=${headingIndexRaw} headings=${headings.length}`);
+      
+      if (!headings.length) {
+        emitDebug('[TOC JUMP] No headings found');
+        emitCmdResult(cmd, false, 'not_found', startedAt);
+        return;
+      }
+
+      let target = null;
+      if (!Number.isNaN(lineNumberRaw) && lineNumberRaw >= 0) {
+        target = headings.find((heading) => Number.parseInt(heading.dataset.headingLine || '-1', 10) === lineNumberRaw);
+        emitDebug(`[TOC JUMP] Search by lineNumber: found=${!!target}`);
+      }
+      if (!(target instanceof Element) && headingSlug) {
+        target = headings.find((heading) => (heading.dataset.headingSlug || '') === headingSlug);
+        emitDebug(`[TOC JUMP] Search by headingSlug: found=${!!target}`);
+      }
+      if (!(target instanceof Element) && headingText) {
+        const normalized = slugifyHeading(headingText);
+        target = headings.find((heading) => (heading.dataset.headingSlug || slugifyHeading(heading.textContent || '')) === normalized);
+        emitDebug(`[TOC JUMP] Search by headingText (normalized="${normalized}"): found=${!!target}`);
+      }
+      if (!(target instanceof Element) && !Number.isNaN(headingIndexRaw) && headingIndexRaw >= 0) {
+        target = headings[Math.min(headingIndexRaw, headings.length - 1)];
+        emitDebug(`[TOC JUMP] Fallback to headingIndex: found=${!!target}`);
+      }
+      if (!(target instanceof Element)) {
+        emitDebug('[TOC JUMP] Target not found');
+        emitCmdResult(cmd, false, 'not_found', startedAt);
+        return;
+      }
+      emitDebug(`[TOC JUMP] Scrolling to target: "${target.textContent?.substring(0, 50)}"`);
+      scrollNodeToViewport(target, topOffset);
+      emitCmdResult(cmd, true, null, startedAt);
+      return;
+    }
+    if (cmd === 'upload_images_result') {
+      const requestId = typeof args?.requestId === 'string' ? args.requestId : '';
+      if (!requestId) {
+        emitCmdResult(cmd, false, 'invalid_args', startedAt);
+        return;
+      }
+      const pending = pendingUploadResolvers.get(requestId);
+      if (!pending) {
+        emitCmdResult(cmd, false, 'request_not_found', startedAt);
+        return;
+      }
+      pendingUploadResolvers.delete(requestId);
+      const reason = typeof args?.reason === 'string' ? args.reason : '';
+      const failureReason = typeof args?.failureReason === 'string' ? args.failureReason : '';
+      const failureCountRaw = Number.parseInt(args?.failureCount, 10);
+      const failureCount = Number.isNaN(failureCountRaw) ? 0 : failureCountRaw;
+      if (failureReason && failureCount > 0) {
+        emit('on_cmd_failure_aggregate', {
+          cmd: 'upload_images',
+          reason: failureReason,
+          count: failureCount,
+        });
+      }
+      if (reason) {
+        pending.reject(new Error(reason));
+        recordUploadFailure(reason);
+        emitCmdResult(cmd, false, reason, startedAt);
+        return;
+      }
+      pending.resolve({
+        images: Array.isArray(args?.images) ? args.images : [],
+      });
+      emitCmdResult(cmd, true, null, startedAt);
+      return;
+    }
+    emitCmdResult(cmd, false, 'unsupported_cmd', startedAt);
+  } catch (error) {
+    console.error('exec_cmd failed', cmd, error);
+    emitCmdResult(cmd, false, `exec_failed:${String(error)}`, startedAt);
+  }
+};
+
+updateViewportMetrics();
+lockViewportZoom();
+window.addEventListener('resize', updateViewportMetrics);
+window.addEventListener('orientationchange', updateViewportMetrics);
+window.visualViewport?.addEventListener('resize', updateViewportMetrics);
+document.addEventListener('keydown', handleEditorShortcut, true);
+// Phase 0 度量：按键时刻用于算「按键→停顿收尾」的输入延迟
+document.addEventListener('keydown', perfMarkKeyDown, true);
+document.addEventListener('beforeinput', perfMarkKeyDown, true);
+
+const onFlutterMessage = (message) => {
+  let m = message;
+  if (typeof message === 'string') {
+    try {
+      m = JSON.parse(message);
+    } catch (err) {
+      console.warn('invalid flutter bridge message', err);
+      return;
+    }
+  }
+  if (!m || typeof m !== 'object') return;
+
+  emitDebug(`[JS] onFlutterMessage: type=${m.type}`);
+
+  if (m.type === 'init_doc') {
+    emitDebug('[JS] init_doc received');
+    const payload = m.payload && typeof m.payload === 'object' ? m.payload : {};
+    currentBaseDirectory = typeof payload.baseDirectory === 'string' ? payload.baseDirectory : '';
+    currentReadOnly = payload.readOnly !== false;
+    applyReadOnlyState();
+    const markdown =
+      typeof payload.markdown === 'string' ? payload.markdown : '';
+    emitDebug(`[JS] init_doc: markdown length=${markdown.length}, editorInstance=${!!editorInstance}`);
+    // 首篇文档到达时编辑器通常还没建：createEditor() 直接拿 currentMarkdown 做 defaultValue，
+    // 不经过 setMarkdown，所以 frontmatter 必须在这里拆，否则会被当成内容解析并回写成 ***。
+    const { frontmatter, body } = splitFrontmatter(markdown);
+    currentFrontmatter = frontmatter;
+    sourceMarkdownBody = body;
+    documentEdited = false;
+    // Always update and render, even if markdown appears the same
+    // (needed when switching between documents)
+    currentMarkdown = body;
+    if (editorInstance) {
+      crepeInstance?.setReadonly?.(currentReadOnly);
+      emitDebug('[JS] init_doc: calling setMarkdown with forceRender=true');
+      // Force re-render by resetting currentMarkdown before setMarkdown
+      setMarkdown(markdown, { forceRender: true });
+      emitDebug('[JS] init_doc: setMarkdown done');
+    } else {
+      emitDebug('[JS] init_doc: no editorInstance, calling ensureEditor');
+      markEditorInitializing();
+      ensureEditor().catch((error) => {
+        console.error('Failed to initialize Milkdown', error);
+        showBootstrapError(error);
+        emit('on_image_error', {
+          src: 'milkdown_bootstrap',
+          reason: `init_failed:${String(error)}`,
+        });
+      });
+    }
+    return;
+  }
+
+  if (m.type === 'update_theme') {
+    applyTheme(m.payload);
+    return;
+  }
+
+  if (m.type === 'exec_cmd') {
+    const cmd = m.payload && m.payload.cmd;
+    const args = m.payload && typeof m.payload === 'object' ? m.payload.args : null;
+    if (typeof cmd !== 'string' || !cmd) {
+      emitCmdResult('', false, 'invalid_cmd', Date.now());
+      return;
+    }
+    executeCommand(cmd, args);
+  }
+};
+
+window.__USHIO_PERF__ = {
+  dump: perfDump,
+  snapshot: perfSnapshot,
+  sections: perfSections,
+  boot: perfBoot,
+  setEnabled: perfSetEnabled,
+  // 诊断入口：syncRenderedDom 是同步的，隐藏标签里 rAF 不触发时也能手动跑一次，
+  // 用于「DOM 指纹一致 + 更快」的重构验证闭环。
+  sync: () => {
+    const t0 = perfNow();
+    syncRenderedDom();
+    return Math.round((perfNow() - t0) * 100) / 100;
+  },
+  syncWithOutline: () => {
+    const t0 = perfNow();
+    syncRenderedDom();
+    updateActiveMarkdownHints();
+    emitOutlineUpdate();
+    return Math.round((perfNow() - t0) * 100) / 100;
+  },
+  setDoc: (markdown) => setMarkdown(markdown, { forceRender: true }),
+  // 判据用：样式/计数门禁需要所有代码块进入真实形态，否则懒加载会把断言放水。
+  mountAllCodeBlocks: () => mountAllLazyCodeBlocks(),
+  // 判据用：区分「没排内容变更」与「排了但被定时器节流还没发」。
+  contentState: () => ({
+    initializing: initializingEditor,
+    applyingFromFlutter: isApplyingFromFlutter,
+    readOnly: currentReadOnly,
+    pending: pendingContentMarkdown != null,
+    progressive: progressiveRenderPending,
+  }),
+  setAppendRender: (on) => { appendRenderEnabled = Boolean(on); },
+  // 诊断用：把阈值设成 0 强制走渐进路径、设成极大值强制走整篇一次替换，
+  // 这样能在同一份文档上比较「分片追加解析」与「整篇解析」的产物是否一致。
+  setProgressiveThreshold: (chars) => {
+    const n = Number(chars);
+    if (Number.isFinite(n) && n >= 0) PROGRESSIVE_RENDER_THRESHOLD_CHARS = n;
+    return PROGRESSIVE_RENDER_THRESHOLD_CHARS;
+  },
+  appendRenderEnabled: () => appendRenderEnabled,
+  // 判据页（tools/dom-oracle.html）需要的真实入口：
+  // 走产品自己的命令通道与追加分片，而不是在测试页里直接改 DOM。
+  execCmd: (cmd, args) => executeCommand(cmd, args || {}),
+  appendRaw: (markdown) => appendMarkdownChunk(markdown),
+  // 判据需要「删掉文档中间某个 HTML 块」这一步：伪块外层是 contenteditable=false，
+  // document.execCommand('delete') 进不去，所以走产品自己的状态层派发真实 tr.delete。
+  deleteNthHtmlBlock: (n) => {
+    if (!editorInstance) return false;
+    return editorInstance.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      let k = -1;
+      let found = null;
+      view.state.doc.descendants((node, pos) => {
+        if (found) return false;
+        if (node.type.name === HTML_BLOCK_NODE
+          || (node.type.name === 'code_block'
+            && String(node.attrs?.language || '').toLowerCase() === HTML_BLOCK_LANGUAGE)) {
+          k += 1;
+          if (k === n) found = { pos, size: node.nodeSize };
+          return false;
+        }
+        return true;
+      });
+      if (!found) return false;
+      view.dispatch(view.state.tr.delete(found.pos, found.pos + found.size));
+      return true;
+    });
+  },
+  serialize: () => {
+    if (!editorInstance) return '';
+    // 未编辑：原文即输出。Serializer 的 marker/空白规范化不该出现在「打开再保存」里。
+    if (!documentEdited) {
+      return currentFrontmatter ? `${currentFrontmatter}${sourceMarkdownBody}` : sourceMarkdownBody;
+    }
+    const rawBody = editorInstance.action((ctx) => ctx.get(serializerCtx)(ctx.get(editorViewCtx).state.doc));
+    const body = normalizeTrailingNewline(deproxyImageUrlsInMarkdown(rawBody, currentBaseDirectory));
+    return normalizeTrailingNewline(currentFrontmatter ? `${currentFrontmatter}${body}` : body);
+  },
+};
+
+window.__USHIO_BRIDGE__ = {
+  onFlutterMessage,
+  emitDebug,
+};
+
+// 通过 bridge handler 主动通知 Flutter「JS 已就绪」。
+// 之前这里 callHandler('onBridgeReady')，而 Flutter 只注册了 'bridge'，通知被丢弃，
+// Flutter 只能靠 100ms 步长轮询判断就绪，白白拖慢每次打开文档的首帧。
+emit('on_bridge_ready', { runtimeTag: RUNTIME_BUILD_TAG });
+
+// Prevent bfcache (back-forward cache) from restoring page without re-running JS
+// This ensures JavaScript is always executed when the page is loaded
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) {
+    console.log('[USHIO] Page restored from bfcache, forcing reload to re-execute JS');
+    window.location.reload();
+  }
+});

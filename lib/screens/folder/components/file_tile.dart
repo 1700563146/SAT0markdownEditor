@@ -1,0 +1,299 @@
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../../../providers/file_provider.dart';
+import '../../../services/file_service.dart';
+import '../../../utils/file_actions.dart';
+import '../../../utils/editor_navigation_helper.dart';
+import '../../../utils/app_style.dart';
+import '../../../utils/responsive_layout.dart';
+import '../../../widgets/app_surface.dart';
+import '../../folder_browser_screen.dart';
+
+class FileTile extends StatelessWidget {
+  final FileSystemEntity entity;
+  final VoidCallback? onRefresh;
+  final bool isDraggable;
+  final int? index;
+  final FileSource source;
+
+  const FileTile({
+    super.key,
+    required this.entity,
+    this.onRefresh,
+    this.isDraggable = false,
+    this.index,
+    this.source = FileSource.myFiles,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final appStyle = Theme.of(context).extension<AppStyleTheme>()!;
+    final isDesktop = ResponsiveLayout.isDesktopWidth(context);
+    final tileRadius = ResponsiveLayout.cardRadius(context);
+    final isFile = entity is File;
+    final name = entity.path.split(Platform.pathSeparator).last;
+    final isImage = isFile && _isImage(name);
+    final isMarkdownFile = isFile && _isMarkdownDocument(entity as File);
+    final isPinned = source == FileSource.pinned;
+
+    // 获取文件/文件夹信息 (日期/大小)
+    String subtitle = '';
+    try {
+      final stat = entity.statSync();
+      // 对于文件夹，显示路径；对于文件，显示路径或大小
+      if (isFile) {
+        if (stat.size < 0 ||
+            stat.modified.year < 1971 ||
+            stat.modified.year > 2100) {
+          subtitle = '未知 · 未知';
+        } else {
+          final date = stat.modified;
+          final formattedDate =
+              '${date.year}/${date.month}/${date.day} ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
+          subtitle = '${_formatSize(stat.size)} · $formattedDate';
+        }
+      } else {
+        subtitle = entity.path;
+      }
+    } catch (_) {
+      subtitle = entity.path;
+    }
+
+    void showEntityActions() {
+      final fileProvider = context.read<FileProvider>();
+      if (isFile) {
+        FileActions.showFileContextMenu(
+          context,
+          entity.path,
+          fileProvider,
+          onRefresh: onRefresh,
+          source: source,
+        );
+      } else {
+        FileActions.showFolderContextMenu(
+          context,
+          entity.path,
+          fileProvider,
+          source: source,
+          onRefresh: onRefresh,
+        );
+      }
+    }
+
+    return AppSurface(
+      borderRadius: BorderRadius.circular(tileRadius),
+      margin: EdgeInsets.only(bottom: isDesktop ? 6 : 8),
+      color: appStyle.scaledSurfaceColor(
+        Theme.of(context).colorScheme,
+        alpha: 0.7,
+      ),
+      border: appStyle.useBorderlessButtons
+          ? null
+          : Border.all(
+              color: isPinned
+                  ? (isFile
+                        ? Theme.of(
+                            context,
+                          ).colorScheme.primary.withValues(alpha: 0.3)
+                        : Colors.amber.withValues(alpha: 0.3))
+                  : Theme.of(context).dividerColor.withValues(alpha: 0.5),
+            ),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(tileRadius),
+            onTap: () async {
+              debugPrint(
+                '[FileTile] onTap: isFile=$isFile, type=${entity.runtimeType}, path=${entity.path}',
+              );
+              if (isFile) {
+                if (isMarkdownFile) {
+                  final fileProvider = context.read<FileProvider>();
+                  final navigationContext = Navigator.of(
+                    context,
+                    rootNavigator: true,
+                  ).context;
+
+                  if (source != FileSource.history) {
+                    await fileProvider.addToRecentFiles(entity.path);
+                  }
+
+                  await EditorNavigationHelper.openEditor(
+                    navigationContext,
+                    entity.path,
+                  );
+                } else if (isImage) {
+                  _showImagePreview(context, entity.path);
+                }
+              } else {
+                final fileProvider = context.read<FileProvider>();
+                fileProvider.addToRecentFolders(entity.path);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) =>
+                        FolderBrowserScreen(folderPath: entity.path),
+                  ),
+                );
+              }
+            },
+            onSecondaryTapDown: isDesktop ? (_) => showEntityActions() : null,
+            onLongPress: showEntityActions,
+            child: Padding(
+              padding: ResponsiveLayout.listTilePadding(context),
+              child: Row(
+                children: [
+                  _buildIcon(context, isFile, isImage, isPinned),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          name,
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(fontWeight: FontWeight.w600),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        Text(
+                          subtitle,
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(context).colorScheme.outline,
+                              ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (isDraggable && index != null)
+                    ReorderableDelayedDragStartListener(
+                      index: index!,
+                      child: Container(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                        child: Icon(
+                          Icons.drag_handle,
+                          color: Theme.of(context).colorScheme.outline,
+                        ),
+                      ),
+                    )
+                  else
+                    Icon(
+                      Icons.chevron_right,
+                      color: Theme.of(context).colorScheme.outline,
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showImagePreview(BuildContext context, String path) {
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: EdgeInsets.zero,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // Modal Barrier (Dark)
+            GestureDetector(
+              onTap: () => Navigator.pop(context),
+              child: Container(
+                color: Colors.black.withValues(alpha: 0.8),
+                width: double.infinity,
+                height: double.infinity,
+              ),
+            ),
+            // Image
+            InteractiveViewer(
+              child: Image.file(File(path), fit: BoxFit.contain),
+            ),
+            // Actions (Optional)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 10,
+              right: 20,
+              child: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIcon(
+    BuildContext context,
+    bool isFile,
+    bool isImage,
+    bool isPinned,
+  ) {
+    IconData iconData;
+
+    if (!isFile) {
+      iconData = Icons.folder;
+    } else if (isImage) {
+      iconData = Icons.image;
+    } else {
+      iconData = Icons.description;
+    }
+
+    return Padding(
+      padding: EdgeInsets.all(ResponsiveLayout.isDesktopWidth(context) ? 6 : 8),
+      child: Icon(
+        iconData,
+        color: context.appMutedIconColor,
+        size: ResponsiveLayout.isDesktopWidth(context) ? 18 : 20,
+      ),
+    );
+  }
+
+  bool _isImage(String name) {
+    final lower = name.toLowerCase();
+    return lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.png') ||
+        lower.endsWith('.gif') ||
+        lower.endsWith('.webp');
+  }
+
+  bool _isMarkdownDocument(File file) {
+    final name = file.path.split(Platform.pathSeparator).last;
+    final lower = name.toLowerCase();
+    if (lower.endsWith('.md') ||
+        lower.endsWith('.markdown') ||
+        lower.endsWith('.txt')) {
+      return true;
+    }
+    if (name.contains('.')) return false;
+    try {
+      final randomAccess = file.openSync();
+      try {
+        final bytes = randomAccess.readSync(FileService.binaryProbeBytes);
+        return FileService.looksLikeTextBytes(bytes);
+      } finally {
+        randomAccess.closeSync();
+      }
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String _formatSize(int bytes) {
+    if (bytes < 0) return '未知';
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+}

@@ -1,0 +1,3123 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:ui';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+import '../l10n/app_localizations.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../providers/file_provider.dart';
+import '../providers/settings_provider.dart';
+import '../utils/constants.dart';
+import '../utils/debouncer.dart';
+import '../utils/editor_navigation_helper.dart';
+import '../widgets/custom_title_bar.dart';
+import '../widgets/markdown_toolbar.dart';
+import '../widgets/milkdown_webview_editor.dart';
+import '../models/toc_item.dart';
+import '../models/milkdown_bridge.dart';
+import '../services/search_history_service.dart';
+import 'editor/components/editor_header.dart';
+import 'editor/components/toc_overlay.dart';
+import 'editor/components/editor_search_bar.dart';
+import 'editor/components/animated_fab.dart';
+import 'editor/components/shortcuts_help_dialog.dart';
+import 'editor/models/editor_models.dart';
+import 'editor/models/editor_patterns.dart';
+import 'editor/models/markdown_parser.dart';
+import 'editor/editor_shortcuts.dart';
+import '../utils/app_style.dart';
+import '../services/export_service.dart';
+import '../utils/debug_log.dart';
+import '../utils/markdown_incremental_merge.dart';
+import '../utils/responsive_layout.dart';
+import '../services/cloud_sync_service.dart';
+import '../services/file_service.dart';
+import '../services/webdav_service.dart';
+import '../services/ftp_service.dart';
+import '../services/my_files_service.dart';
+import '../services/sync_service_interface.dart';
+import '../services/version_service.dart';
+import '../models/document_version.dart';
+import 'editor/components/version_history_sheet.dart';
+import 'editor/components/diff_view_overlay.dart';
+
+enum EditorMode { edit, preview }
+
+class EditorScreen extends StatefulWidget {
+  final String filePath;
+  final String? initialContent;
+
+  const EditorScreen({super.key, required this.filePath, this.initialContent});
+
+  @override
+  State<EditorScreen> createState() => _EditorScreenState();
+}
+
+class _EditorScreenState extends State<EditorScreen>
+    with TickerProviderStateMixin, WidgetsBindingObserver {
+  // ==================== 状态变量 ====================
+  static const int _maxEditHistory = 100;
+
+  /// 根据文件大小动态限制历史步数
+  int get _effectiveMaxHistory {
+    final textLength = _textController.text.length;
+    if (textLength > 100000) return 20; // > 100KB: 20 步
+    if (textLength > 50000) return 50; // > 50KB: 50 步
+    return _maxEditHistory; // 默认 100 步
+  }
+
+  final List<EditHistoryEntry> _editHistory = [];
+  int _historyIndex = -1;
+  bool _isApplyingHistory = false;
+  bool _textListenerAttached = false;
+  final Debouncer _mergeDebouncer = Debouncer(
+    duration: const Duration(milliseconds: 350),
+  );
+  String? _pendingMilkdownMarkdown;
+  int _milkdownChangeSeq = 0;
+
+  // ==================== 字数统计缓存 ====================
+  int _cachedCharCount = 0;
+  int _cachedGlyphCount = 0;
+  int _cachedWordCount = 0;
+  Timer? _wordCountDebounce;
+
+  late TextEditingController _textController;
+  late TextEditingController _searchController;
+  late ScrollController _editScrollController;
+  late UndoHistoryController _undoController;
+  late FocusNode _searchFocusNode;
+  late FocusNode _editFocusNode;
+  late AnimationController _highlightController;
+  late Animation<double> _highlightAnimation;
+  bool _editSelectionListenerAttached = false;
+
+  /// 搜索防抖 Timer
+  Timer? _searchDebounceTimer;
+
+  final _previewWebViewController = MilkdownWebViewController();
+
+  /// 把 Flutter 侧的遮挡数据同步给 WebView。
+  ///
+  /// WebView 在 adjustNothing 下尺寸恒定，`visualViewport` 也报不出软键盘，
+  /// 工具栏和头部又是压在它上面的 Flutter 覆盖层：这三段高度只有这里知道。
+  void _pushPreviewOcclusion() {
+    _previewWebViewController.setKeyboardMetrics(
+      keyboardInset: MediaQuery.viewInsetsOf(context).bottom,
+      toolbarHeight: MarkdownToolbar.heightFor(context),
+      headerHeight: EditorHeader.reserveHeight,
+    );
+  }
+
+  int? _editingBlockIndex;
+  late TextEditingController _inlineEditController;
+  late FocusNode _inlineEditFocusNode;
+
+  EditorMode _mode = EditorMode.preview;
+
+  /// 编辑态下冻结给预览 WebView 的 markdown。
+  ///
+  /// 预览面板是 Android 平台视图，卸载再挂回的代价是整个编辑器重新加载与求值
+  /// （实测冷 ~1.4s、热 ~440ms），所以编辑态只把它 Offstage 掉。既然实例还在，
+  /// 就不能再跟随 _textController 每次按键重发全文，故进入编辑态时冻结一份。
+  String _webViewMarkdownInEdit = '';
+  bool _isLoading = true;
+  bool _isModified = false;
+  bool _isSaving = false;
+  bool _isAutoSaving = false;
+  DateTime? _lastSaveTime;
+  Timer? _blurFallbackTimer;
+  bool _isMilkdownEditorFocused = false;
+  bool _showToc = false;
+  bool _showSearchBar = false;
+  bool _showSearchCandidates = false;
+  final TocOverlayController _tocOverlayController = TocOverlayController();
+  bool _previewCanUndo = false;
+  bool _previewCanRedo = false;
+  bool _hidePlatformViews = false;
+  bool _isAppInBackground = false;
+  Timer? _autoSaveTimer;
+  int? _highlightedLine;
+  List<SearchMatch> _searchMatches = const [];
+  int _activeSearchMatchIndex = -1;
+  SearchOptions _searchOptions = const SearchOptions();
+  List<String> _searchHistory = [];
+  final _searchHistoryService = SearchHistoryService();
+
+  // Original Markdown for incremental merge (preserves original formatting)
+  String _originalMarkdown = '';
+  String _originalLineEnding = '\n';
+  bool _isMilkdownReady = false;
+  static const bool _enableIncrementalMerge = true;
+
+  // Undo/redo feedback state
+  String? _lastActionFeedback;
+  Timer? _actionFeedbackTimer;
+
+  // Floating buttons auto-hide state
+  bool _floatingButtonsVisible = true;
+  Timer? _hideFloatingButtonsTimer;
+
+  String? _error;
+  List<TocItem> _tocItems = [];
+  int? _currentTocIndex;
+
+  // ==================== 版本历史 ====================
+  final _versionService = VersionService();
+  final _versionHistoryController = VersionHistoryController();
+  bool _showVersionHistoryOverlay = false;
+  List<DocumentVersion> _versions = [];
+  bool _isLoadingVersions = false;
+  String? _versionErrorMessage;
+  OverlayEntry? _diffOverlayEntry;
+  bool _isRestoringVersion = false;
+
+  static const _jumpTopOffset = 32.0;
+
+  /// Hide floating buttons temporarily
+  void _hideFloatingButtons() {
+    final settings = context.read<SettingsProvider>();
+    // Skip if mode is 'always' or 'never'
+    if (settings.floatingButtonsMode != 'auto') return;
+
+    _hideFloatingButtonsTimer?.cancel();
+    if (_floatingButtonsVisible && mounted) {
+      setState(() => _floatingButtonsVisible = false);
+    }
+  }
+
+  /// Show floating buttons after delay
+  void _showFloatingButtonsAfterDelay() {
+    final settings = context.read<SettingsProvider>();
+    // Skip if mode is 'always' or 'never'
+    if (settings.floatingButtonsMode != 'auto') return;
+
+    _hideFloatingButtonsTimer?.cancel();
+    _hideFloatingButtonsTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted && !_floatingButtonsVisible) {
+        setState(() => _floatingButtonsVisible = true);
+      }
+    });
+  }
+
+  /// 进入编辑态：冻结下发给预览的内容，并把 IME 从平台视图上摘下来。
+  void _enterEditMode() {
+    _flushPendingMilkdownMerge();
+    _webViewMarkdownInEdit = _textController.text;
+    unawaited(_previewWebViewController.execCmd('blur_editor'));
+    unawaited(_previewWebViewController.clearFocus());
+    setState(() {
+      _mode = EditorMode.edit;
+      _isMilkdownEditorFocused = false;
+    });
+  }
+
+  /// 回到预览态：预览重新跟随文本，差异由 WebView 的 didUpdateWidget 增量下发。
+  void _enterPreviewMode() {
+    setState(() {
+      _mode = EditorMode.preview;
+      _isMilkdownEditorFocused = false;
+      _previewCanUndo = false;
+      _previewCanRedo = false;
+    });
+  }
+
+  /// Handle user interaction - hide buttons and schedule show
+  ///
+  /// 带节流：连续指针事件（如滚动时的 onPointerMove）在 100ms 内只处理一次，
+  /// 避免高频 Timer 创建/取消。
+  DateTime? _lastInteractionTime;
+
+  void _onUserInteraction() {
+    final now = DateTime.now();
+    final last = _lastInteractionTime;
+    if (last != null && now.difference(last).inMilliseconds < 100) {
+      return; // 节流中，跳过
+    }
+    _lastInteractionTime = now;
+    _hideFloatingButtons();
+    _showFloatingButtonsAfterDelay();
+  }
+
+  void _onEditFocusChanged() {
+    if (!mounted) return;
+    // Hide floating buttons when edit field gains focus
+    if (_editFocusNode.hasFocus && _mode == EditorMode.edit) {
+      _hideFloatingButtons();
+      _showFloatingButtonsAfterDelay();
+    }
+  }
+
+  String get fileName => widget.filePath.split(Platform.pathSeparator).last;
+
+  @override
+  void initState() {
+    super.initState();
+    appDebugLog('[EDITOR] initState called for: ${widget.filePath}');
+    appDebugLog(
+      '[EDITOR] initialContent provided: ${widget.initialContent != null}, length: ${widget.initialContent?.length ?? "N/A"}',
+    );
+
+    final initStopwatch = Stopwatch()..start();
+
+    WidgetsBinding.instance.addObserver(this);
+
+    // Save last opened file path for startup restore
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final settings = context.read<SettingsProvider>();
+      settings.setLastOpenedFilePath(widget.filePath);
+    });
+
+    _textController = TextEditingController();
+    _searchController = TextEditingController();
+    _editScrollController = ScrollController();
+    _undoController = UndoHistoryController();
+    _searchFocusNode = FocusNode();
+    _editFocusNode = FocusNode();
+    _editFocusNode.addListener(_onEditFocusChanged);
+    _inlineEditController = TextEditingController();
+    _inlineEditFocusNode = FocusNode();
+    _inlineEditFocusNode.addListener(_onInlineEditFocusChanged);
+    _highlightController = AnimationController(
+      duration: const Duration(milliseconds: 600),
+      vsync: this,
+    );
+    _highlightAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _highlightController, curve: Curves.easeInOut),
+    );
+    _searchFocusNode.addListener(_onSearchFocusChanged);
+    _attachEditSelectionListener();
+
+    initStopwatch.stop();
+    appDebugLog(
+      '[EDITOR] Controllers initialized in ${initStopwatch.elapsedMilliseconds}ms',
+    );
+
+    // Load search history in background without blocking UI
+    unawaited(_loadSearchHistory());
+
+    if (widget.initialContent != null) {
+      appDebugLog('[EDITOR] Using initialContent, skipping file load');
+      _applyLoadedContent(widget.initialContent!);
+      _configureAutoSave();
+      _isLoading = false;
+      appDebugLog('[EDITOR] initState complete (cached content)');
+    } else {
+      appDebugLog('[EDITOR] No initialContent, calling _loadFile()');
+      _loadFile();
+    }
+  }
+
+  Future<void> _loadSearchHistory() async {
+    appDebugLog('[EDITOR] _loadSearchHistory starting...');
+    final history = await _searchHistoryService.getHistory();
+    appDebugLog('[EDITOR] _loadSearchHistory done, ${history.length} items');
+    if (mounted) {
+      setState(() => _searchHistory = history);
+    }
+  }
+
+  Future<void> _loadFile() async {
+    appDebugLog('[EDITOR] _loadFile starting...');
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+
+    try {
+      final fileService = context.read<FileProvider>().fileService;
+      appDebugLog('[EDITOR] Reading file: ${widget.filePath}');
+      final loadStopwatch = Stopwatch()..start();
+      final content = await fileService.readFile(widget.filePath);
+      loadStopwatch.stop();
+      appDebugLog(
+        '[EDITOR] File read in ${loadStopwatch.elapsedMilliseconds}ms, length: ${content.length}',
+      );
+
+      if (!mounted) return;
+      _applyLoadedContent(content);
+      _configureAutoSave();
+    } catch (e) {
+      appDebugLog('[EDITOR] _loadFile ERROR: $e');
+      _error = e.toString();
+    }
+
+    if (mounted) {
+      setState(() => _isLoading = false);
+      appDebugLog('[EDITOR] _loadFile complete, _isLoading = false');
+    }
+  }
+
+  void _applyLoadedContent(String content) {
+    appDebugLog(
+      '[EDITOR] _applyLoadedContent called, length: ${content.length}',
+    );
+    _textController.text = content;
+    // Store original markdown for incremental merge
+    _originalMarkdown = content;
+    _originalLineEnding = content.contains('\r\n') ? '\r\n' : '\n';
+    _isMilkdownReady = false;
+    if (!_textListenerAttached) {
+      _textController.addListener(_onTextChanged);
+      _textListenerAttached = true;
+    }
+    // 初始化字数统计缓存
+    _cachedCharCount = content.length;
+    _cachedGlyphCount = content.runes.where((char) {
+      final value = String.fromCharCode(char);
+      return value.trim().isNotEmpty;
+    }).length;
+    _cachedWordCount = content
+        .split(wordSplitRegex)
+        .where((w) => w.isNotEmpty)
+        .length;
+    _recordHistorySnapshot(
+      text: content,
+      selection: const TextSelection.collapsed(offset: 0),
+      reset: true,
+    );
+  }
+
+  void _configureAutoSave() {
+    _autoSaveTimer?.cancel();
+    final settings = context.read<SettingsProvider>();
+    if (settings.autoSave) {
+      _autoSaveTimer = Timer.periodic(
+        Duration(seconds: settings.autoSaveInterval),
+        (_) => _autoSave(),
+      );
+    }
+  }
+
+  void _attachEditSelectionListener() {
+    if (_editSelectionListenerAttached) return;
+    _editSelectionListenerAttached = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_editSelectionListenerAttached) return;
+      _textController.addListener(_onEditSelectionChanged);
+    });
+  }
+
+  void _onEditSelectionChanged() {
+    if (_mode != EditorMode.edit) return;
+    if (!_editFocusNode.hasFocus) return;
+    final selection = _textController.selection;
+    if (!selection.isValid) return;
+    // Skip scroll adjustment during IME composition to prevent cursor jumping
+    if (_textController.value.composing != TextRange.empty) return;
+    _scheduleEditScrollToCursor();
+  }
+
+  Timer? _editScrollTimer;
+
+  void _scheduleEditScrollToCursor() {
+    _editScrollTimer?.cancel();
+    _editScrollTimer = Timer(const Duration(milliseconds: 50), () {
+      _scrollEditToCursor();
+    });
+    // Hide floating buttons on scroll
+    _onUserInteraction();
+  }
+
+  void _scrollEditToCursor() {
+    if (!mounted) return;
+    if (_mode != EditorMode.edit) return;
+    if (!_editFocusNode.hasFocus) return;
+
+    final selection = _textController.selection;
+    if (!selection.isValid) return;
+
+    final text = _textController.text;
+    final cursorOffset = selection.extentOffset.clamp(0, text.length);
+    final settings = context.read<SettingsProvider>();
+    final fontSize = settings.fontSize;
+    final lineHeight = fontSize * 1.5;
+
+    if (!_editScrollController.hasClients) return;
+    final scrollPosition = _editScrollController.position;
+    final viewportHeight = scrollPosition.viewportDimension;
+    final keyboardInset = MediaQuery.of(context).viewInsets.bottom;
+    final toolbarHeight = MarkdownToolbar.heightFor(context);
+
+    // 预留输入法遮挡的安全距离
+    // 当键盘弹出时，输入法可能会遮挡部分区域
+    // 添加预测性滚动边距，提前滚动避免光标进入遮挡区域
+    const imeSafeMargin = 80.0;
+    final bottomOffset = keyboardInset + toolbarHeight + imeSafeMargin;
+
+    // 顶部留白要和 _buildEditPanel 的 contentPadding 完全一致
+    final caretY = _editCaretY(
+      cursorOffset,
+      EditorHeader.reserveHeight + 16,
+      lineHeight,
+      scrollPosition,
+    );
+
+    final visibleTop = scrollPosition.pixels;
+    final visibleBottom = visibleTop + viewportHeight - bottomOffset;
+
+    // 顶部安全边距：当光标接近顶部时提前滚动
+    const topMargin = 100.0;
+    // 底部预测边距：光标距离底部遮挡区域这个距离时就开始滚动
+    final predictiveBottomMargin = lineHeight * 2;
+
+    if (caretY < visibleTop + topMargin) {
+      _editScrollController.animateTo(
+        (caretY - topMargin).clamp(0.0, scrollPosition.maxScrollExtent),
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+      );
+    } else if (caretY > visibleBottom - predictiveBottomMargin) {
+      // 光标即将进入底部遮挡区域，提前滚动
+      _editScrollController.animateTo(
+        (caretY - viewportHeight + bottomOffset + predictiveBottomMargin)
+            .clamp(0.0, scrollPosition.maxScrollExtent),
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  /// 光标在滚动内容坐标系里的 Y。
+  ///
+  /// 旧的「行号 × 行高」估法看不见软换行：一段折了三行的长文本只被算成一行，
+  /// 估出来的位置比真实位置高一大截，于是永远滚不到看得见光标的那里。
+  /// 布局就绪时直接问 [RenderEditable] 要，拿不到才退回估算。
+  double _editCaretY(
+    int cursorOffset,
+    double topPadding,
+    double lineHeight,
+    ScrollPosition scrollPosition,
+  ) {
+    final editable = _editFocusNode.context
+        ?.findAncestorStateOfType<EditableTextState>()
+        ?.renderEditable;
+    final viewport = scrollPosition.context.storageContext.findRenderObject();
+    if (editable != null &&
+        editable.attached &&
+        editable.hasSize &&
+        viewport is RenderBox &&
+        viewport.attached) {
+      final caret = editable.getLocalRectForCaret(
+        TextPosition(offset: cursorOffset),
+      );
+      final caretGlobal = editable.localToGlobal(caret.topLeft);
+      final viewportGlobal = viewport.localToGlobal(Offset.zero);
+      return caretGlobal.dy - viewportGlobal.dy + scrollPosition.pixels;
+    }
+
+    final lineCount = _textController.text
+        .substring(0, cursorOffset)
+        .split('\n')
+        .length;
+    return topPadding + ((lineCount - 1) * lineHeight);
+  }
+
+  void _onTextChanged() {
+    if (!_isModified) {
+      setState(() => _isModified = true);
+    }
+    if (!_isApplyingHistory) {
+      _recordHistorySnapshot();
+    }
+    _scheduleWordCountUpdate();
+  }
+
+  void _scheduleWordCountUpdate() {
+    _wordCountDebounce?.cancel();
+    _wordCountDebounce = Timer(const Duration(milliseconds: 300), () {
+      _updateWordCount();
+    });
+  }
+
+  void _updateWordCount() {
+    final text = _textController.text;
+    _cachedCharCount = text.length;
+    _cachedGlyphCount = text.runes.where((char) {
+      final value = String.fromCharCode(char);
+      return value.trim().isNotEmpty;
+    }).length;
+    _cachedWordCount = text
+        .split(wordSplitRegex)
+        .where((w) => w.isNotEmpty)
+        .length;
+    if (mounted) setState(() {});
+  }
+
+  void _recordHistorySnapshot({
+    String? text,
+    TextSelection? selection,
+    bool reset = false,
+  }) {
+    final t = text ?? _textController.text;
+    final s = selection ?? _textController.selection;
+    final safe = _safeSelection(s, t.length);
+
+    if (reset) {
+      _editHistory
+        ..clear()
+        ..add(EditHistoryEntry(text: t, selection: safe));
+      _historyIndex = 0;
+      return;
+    }
+
+    if (_historyIndex >= 0 && _historyIndex < _editHistory.length) {
+      final cur = _editHistory[_historyIndex];
+      if (cur.text == t) return;
+    }
+
+    if (_historyIndex < _editHistory.length - 1) {
+      _editHistory.removeRange(_historyIndex + 1, _editHistory.length);
+    }
+
+    _editHistory.add(EditHistoryEntry(text: t, selection: safe));
+    if (_editHistory.length > _effectiveMaxHistory) {
+      final overflow = _editHistory.length - _effectiveMaxHistory;
+      _editHistory.removeRange(0, overflow);
+      _historyIndex = (_historyIndex - overflow).clamp(
+        0,
+        _editHistory.length - 1,
+      );
+    }
+    _historyIndex = _editHistory.length - 1;
+    if (mounted) setState(() {});
+  }
+
+  TextSelection _safeSelection(TextSelection sel, int textLength) {
+    final base = sel.baseOffset.clamp(0, textLength).toInt();
+    final extent = sel.extentOffset.clamp(0, textLength).toInt();
+    return TextSelection(baseOffset: base, extentOffset: extent);
+  }
+
+  void _undoEditHistory() {
+    // In preview mode, route undo to ProseMirror instead of manipulating
+    // the Flutter text controller. This avoids sending init_doc which would
+    // replace the ProseMirror document and destroy cursor position and history.
+    if (_mode == EditorMode.preview && _editingBlockIndex == null) {
+      _previewWebViewController.execCmd('undo');
+      _showActionFeedback('已撤销');
+      return;
+    }
+    if (_historyIndex <= 0) return;
+    _historyIndex--;
+    final entry = _editHistory[_historyIndex];
+    _isApplyingHistory = true;
+    _textController.value = TextEditingValue(
+      text: entry.text,
+      selection: entry.selection,
+    );
+    _isApplyingHistory = false;
+    _showActionFeedback('已撤销');
+    setState(() {});
+  }
+
+  void _redoEditHistory() {
+    // In preview mode, route redo to ProseMirror (same rationale as undo).
+    if (_mode == EditorMode.preview && _editingBlockIndex == null) {
+      _previewWebViewController.execCmd('redo');
+      _showActionFeedback('已重做');
+      return;
+    }
+    if (_historyIndex < 0 || _historyIndex >= _editHistory.length - 1) return;
+    _historyIndex++;
+    final entry = _editHistory[_historyIndex];
+    _isApplyingHistory = true;
+    _textController.value = TextEditingValue(
+      text: entry.text,
+      selection: entry.selection,
+    );
+    _isApplyingHistory = false;
+    _showActionFeedback('已重做');
+    setState(() {});
+  }
+
+  void _handleOutlineUpdate(OnOutlineUpdatePayload payload) {
+    final items = payload.outline
+        .map((node) {
+          final lineNumber =
+              int.tryParse(node.id.replaceFirst('line-', '')) ?? 0;
+          return TocItem(
+            level: node.level,
+            title: node.text,
+            lineNumber: lineNumber,
+            anchorKey: GlobalKey(),
+          );
+        })
+        .toList(growable: false);
+    if (!mounted) return;
+    setState(() => _tocItems = items);
+  }
+
+  void _jumpToHeading(int headingIndex, TocItem item) {
+    // Update current TOC index for highlighting
+    setState(() => _currentTocIndex = headingIndex);
+
+    if (_showToc) {
+      _tocOverlayController.close();
+    }
+
+    if (_mode == EditorMode.edit) {
+      final lines = _textController.text.split('\n');
+      int position = 0;
+      for (int i = 0; i < item.lineNumber && i < lines.length; i++) {
+        position += lines[i].length + 1;
+      }
+      _textController.selection = TextSelection.collapsed(offset: position);
+      if (_editScrollController.hasClients) {
+        const lineHeight = 24.0;
+        final maxScroll = _editScrollController.position.maxScrollExtent;
+        final targetScroll = (item.lineNumber * lineHeight - _jumpTopOffset)
+            .clamp(0.0, maxScroll);
+        _editScrollController.jumpTo(targetScroll);
+      }
+      _flashLineHighlight(item.lineNumber);
+    } else {
+      if (headingIndex >= 0) {
+        _previewWebViewController.scrollToHeading(
+          headingIndex: headingIndex,
+          lineNumber: item.lineNumber,
+          headingText: item.title,
+          topOffset: _jumpTopOffset,
+        );
+      }
+    }
+  }
+
+  void _flashLineHighlight(int lineNumber) {
+    if (!mounted || _mode != EditorMode.edit) return;
+    setState(() => _highlightedLine = lineNumber);
+    _highlightController.forward(from: 0.0).then((_) {
+      Future.delayed(const Duration(milliseconds: 300), () {
+        if (mounted) setState(() => _highlightedLine = null);
+      });
+    });
+  }
+
+  void _showActionFeedback(String message) {
+    _actionFeedbackTimer?.cancel();
+    setState(() => _lastActionFeedback = message);
+    _actionFeedbackTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _lastActionFeedback = null);
+    });
+  }
+
+  Future<void> _autoSave() async {
+    // 如果正在回退版本，跳过自动保存
+    if (_isRestoringVersion) return;
+    if (_isModified && !_isSaving) {
+      setState(() => _isAutoSaving = true);
+      await _saveFile(showSnackbar: false, isAutoSave: true);
+      if (mounted) {
+        setState(() => _isAutoSaving = false);
+      }
+    }
+  }
+
+  String _normalizeLineEndings(String text) {
+    return FileService.normalizeLineEndings(
+      text,
+      lineEnding: _originalLineEnding,
+    );
+  }
+
+  Future<void> _saveFile({
+    bool showSnackbar = true,
+    bool isAutoSave = false,
+  }) async {
+    final l10n = AppLocalizations.of(context)!;
+    if (_isSaving) return;
+
+    // 没有任何编辑就不碰文件：打开再保存必须逐字节保持原样。
+    // 一旦写盘，换行归一化和增量合并的回波都可能改写用户的文件。
+    if (!_isModified && _pendingMilkdownMarkdown == null) {
+      return;
+    }
+
+    // 保存前先应用尚未执行的增量合并，避免保存到过期内容。
+    _flushPendingMilkdownMerge();
+
+    setState(() => _isSaving = true);
+
+    try {
+      final fileService = context.read<FileProvider>().fileService;
+      await fileService.saveFile(
+        widget.filePath,
+        _normalizeLineEndings(_textController.text),
+      );
+      if (mounted) {
+        // Update original markdown after successful save
+        // This resets the baseline for future incremental merges
+        _originalMarkdown = _textController.text;
+        setState(() {
+          _isModified = false;
+          _lastSaveTime = DateTime.now();
+        });
+      }
+
+      // 创建版本快照（失败不影响保存成功状态）
+      _createVersionSnapshot();
+
+      if (showSnackbar && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(
+                    color: Colors.green.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(Icons.check, color: Colors.green, size: 16),
+                ),
+                const SizedBox(width: 12),
+                Text(l10n.saveSuccess),
+              ],
+            ),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            duration: const Duration(seconds: 1),
+          ),
+        );
+      }
+
+      // 自动云同步
+      if (mounted) {
+        final settings = context.read<SettingsProvider>();
+        if (settings.autoSyncEnabled && settings.isSyncConfigured) {
+          _triggerAutoSync();
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.error, color: Colors.white),
+                const SizedBox(width: 12),
+                Text(l10n.saveFailedWithError(e.toString())),
+              ],
+            ),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        );
+      }
+    }
+
+    if (mounted) {
+      setState(() => _isSaving = false);
+    }
+  }
+
+  /// 触发自动云同步（后台执行，不阻塞 UI）
+  void _triggerAutoSync() async {
+    try {
+      final settings = context.read<SettingsProvider>();
+
+      // 初始化同步服务
+      SyncServiceInterface syncService;
+      if (settings.syncType == 'webdav') {
+        syncService = WebDAVService();
+        if (settings.isWebdavConfigured) {
+          syncService.setRemoteWorkspaceName(settings.syncFolderName);
+          syncService.setRemotePathPrefix(settings.syncRemotePath);
+          final creds = settings.getWebdavCredentials();
+          (syncService as WebDAVService).initialize(
+            WebDAVConfig(
+              url: creds['url']!,
+              username: creds['username']!,
+              password: creds['password']!,
+            ),
+          );
+        }
+      } else {
+        syncService = FTPService();
+        if (settings.isFtpConfigured) {
+          syncService.setRemoteWorkspaceName(settings.syncFolderName);
+          syncService.setRemotePathPrefix(settings.syncRemotePath);
+          final creds = settings.getFtpCredentials();
+          (syncService as FTPService).initialize(
+            FTPConfig(
+              host: settings.ftpHost,
+              port: settings.ftpPort,
+              username: creds['username']!,
+              password: creds['password']!,
+            ),
+          );
+        }
+      }
+
+      final myFilesService = MyFilesService();
+      myFilesService.setSettingsProvider(settings);
+
+      final cloudSyncService = CloudSyncService(
+        syncService: syncService,
+        myFilesService: myFilesService,
+      );
+
+      // 同步单个文件
+      final success = await cloudSyncService.syncFile(widget.filePath);
+
+      if (success) {
+        settings.updateLastSyncTime();
+        appDebugLog('[AutoSync] 文件同步成功: ${widget.filePath}');
+      }
+
+      cloudSyncService.dispose();
+    } catch (e) {
+      appDebugLog('[AutoSync] 同步失败: $e');
+    }
+  }
+
+  // ==================== 版本历史 ====================
+
+  /// 创建版本快照（后台执行，失败不影响保存状态）
+  void _createVersionSnapshot() {
+    unawaited(
+      _versionService
+          .createVersion(widget.filePath, _textController.text)
+          .then((version) {
+            appDebugLog('[Version] 版本快照创建成功: v${version.versionNumber}');
+          })
+          .catchError((e) {
+            appDebugLog('[Version] 版本快照创建失败（不影响保存）: $e');
+          }),
+    );
+  }
+
+  /// 显示版本历史覆盖层
+  Future<void> _showVersionHistory() async {
+    setState(() {
+      _showVersionHistoryOverlay = true;
+      _isLoadingVersions = true;
+      _versionErrorMessage = null;
+    });
+
+    try {
+      final versions = await _versionService.getVersionHistory(widget.filePath);
+      if (mounted) {
+        setState(() {
+          _versions = versions;
+          _isLoadingVersions = false;
+        });
+      }
+    } catch (e) {
+      appDebugLog('[Version] 加载版本历史失败: $e');
+      if (mounted) {
+        setState(() {
+          _versionErrorMessage = '加载版本历史失败';
+          _isLoadingVersions = false;
+        });
+      }
+    }
+  }
+
+  /// 关闭版本历史覆盖层
+  void _closeVersionHistory() {
+    if (mounted) {
+      setState(() => _showVersionHistoryOverlay = false);
+    }
+  }
+
+  /// 更新版本备注
+  Future<void> _updateVersionNote(DocumentVersion version, String note) async {
+    await _versionService.updateVersionNote(
+      widget.filePath,
+      version.versionNumber,
+      note,
+    );
+    // 刷新版本列表
+    final versions = await _versionService.getVersionHistory(widget.filePath);
+    if (mounted) {
+      setState(() {
+        _versions = versions;
+      });
+    }
+  }
+
+  /// 显示未保存修改的 Diff 对比视图
+  ///
+  /// 对比 _originalMarkdown（上次保存的内容）与 _textController.text（当前内容）
+  Future<void> _showUnsavedChangesDiff() async {
+    try {
+      // 获取最新版本信息用于显示
+      final versions = await _versionService.getVersionHistory(widget.filePath);
+      final latestVersion = versions.isNotEmpty ? versions.first : null;
+
+      if (!mounted) return;
+
+      // 创建"当前编辑中"的临时版本对象
+      final currentEditingVersion = DocumentVersion(
+        versionId: 'unsaved',
+        versionNumber: latestVersion != null
+            ? latestVersion.versionNumber + 1
+            : 1,
+        timestamp: DateTime.now(),
+        note: '编辑中（未保存）',
+        filePath: widget.filePath,
+        versionPath: widget.filePath,
+        fileSize: _textController.text.length,
+      );
+
+      _diffOverlayEntry = showDiffViewOverlay(
+        context: context,
+        oldVersion: latestVersion ?? currentEditingVersion,
+        newVersion: currentEditingVersion,
+        oldContent: _originalMarkdown,
+        newContent: _textController.text,
+        // 未保存修改视图中，回退按钮变为"丢弃修改"
+        onRestore: (_) => _discardUnsavedChanges(),
+        onCreateNewDoc: (_) {}, // 未保存修改不支持创建新文档
+      );
+    } catch (e) {
+      appDebugLog('[Version] 加载未保存修改对比失败: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('加载对比失败: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  /// 丢弃未保存的修改，恢复到上次保存的内容
+  Future<void> _discardUnsavedChanges() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        title: const Text('丢弃修改'),
+        content: const Text('确定要丢弃所有未保存的修改吗？\n此操作无法撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('丢弃'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    // 恢复到上次保存的内容
+    _textController.removeListener(_onTextChanged);
+    _textController.text = _originalMarkdown;
+    _textController.addListener(_onTextChanged);
+    _recordHistorySnapshot(reset: true);
+
+    setState(() {
+      _isModified = false;
+    });
+
+    // 关闭 diff 视图
+    _diffOverlayEntry?.remove();
+    _diffOverlayEntry = null;
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('已丢弃未保存的修改'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  /// 显示 Diff 对比视图
+  ///
+  /// Git 风格版本对比：
+  /// - v1 是初始版本，无历史对比
+  /// - vk (k>1) 显示 vk-1 与 vk 的差异
+  Future<void> _showDiffView(DocumentVersion version) async {
+    try {
+      // v1 是初始版本，无历史对比
+      if (version.versionNumber <= 1) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('v1 是初始版本，无历史对比'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
+
+      // 获取 vk-1 的内容（旧版本）
+      final oldVersionContent = await _versionService.getVersionContent(
+        widget.filePath,
+        version.versionNumber - 1,
+      );
+      // 获取 vk 的内容（新版本）
+      final newVersionContent = await _versionService.getVersionContent(
+        widget.filePath,
+        version.versionNumber,
+      );
+
+      if (!mounted) return;
+
+      // 获取 vk-1 的版本信息
+      final versions = await _versionService.getVersionHistory(widget.filePath);
+      final oldVersion = versions.firstWhere(
+        (v) => v.versionNumber == version.versionNumber - 1,
+        orElse: () => version, // fallback，不应该发生
+      );
+
+      _diffOverlayEntry = showDiffViewOverlay(
+        context: context,
+        oldVersion: oldVersion, // vk-1
+        newVersion: version, // vk
+        oldContent: oldVersionContent,
+        newContent: newVersionContent,
+        onRestore: _restoreVersion,
+        onCreateNewDoc: (_) => _createNewDocFromVersion(version),
+      );
+    } catch (e) {
+      appDebugLog('[Version] 加载版本内容失败: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('加载版本内容失败: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  /// 回退到指定版本
+  Future<void> _restoreVersion(DocumentVersion version) async {
+    // 移除 diff 覆盖层，避免遮挡确认对话框
+    _diffOverlayEntry?.remove();
+
+    // 显示确认对话框
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        title: const Text('确认回退版本'),
+        content: Text('将回退到版本 v${version.versionNumber}，当前内容会自动备份。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('回退'),
+          ),
+        ],
+      ),
+    );
+
+    // 用户取消，重新显示 diff 覆盖层
+    if (confirmed != true) {
+      _diffOverlayEntry = showDiffViewOverlay(
+        context: context,
+        oldVersion: version,
+        newVersion: version,
+        oldContent: '',
+        newContent: '',
+        onRestore: _restoreVersion,
+        onCreateNewDoc: (_) => _createNewDocFromVersion(version),
+      );
+      return;
+    }
+
+    // 暂停自动保存，避免文件冲突
+    _autoSaveTimer?.cancel();
+    _isRestoringVersion = true;
+
+    try {
+      // 调用 VersionService 执行回退（内部会自动创建备份）
+      final restoredVersion = await _versionService.restoreVersion(
+        widget.filePath,
+        version.versionNumber,
+      );
+
+      // 读取恢复后的内容并更新编辑器
+      final restoredContent = await _versionService.getVersionContent(
+        widget.filePath,
+        version.versionNumber,
+      );
+
+      if (!mounted) return;
+
+      // 更新编辑器内容和增量合并基准
+      _textController.removeListener(_onTextChanged);
+      _textController.text = restoredContent;
+      _originalMarkdown = restoredContent;
+      _textController.addListener(_onTextChanged);
+
+      // 重置编辑历史
+      _recordHistorySnapshot(reset: true);
+
+      setState(() {
+        _isModified = false;
+        _lastSaveTime = DateTime.now();
+      });
+
+      // 关闭所有覆盖层
+      _diffOverlayEntry?.remove();
+      _diffOverlayEntry = null;
+      _closeVersionHistory();
+
+      // 显示成功提示（包含备份版本信息）
+      final backupVersionNumber = restoredVersion.versionNumber - 1;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: Colors.green.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.check, color: Colors.green, size: 16),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  '已回退到 v${version.versionNumber}，备份为 v$backupVersionNumber',
+                ),
+              ),
+            ],
+          ),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      appDebugLog('[Version] 版本回退失败: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.error, color: Colors.white),
+                const SizedBox(width: 12),
+                Expanded(child: Text('版本回退失败: $e')),
+              ],
+            ),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        );
+      }
+    } finally {
+      // 恢复自动保存
+      _isRestoringVersion = false;
+      _configureAutoSave();
+    }
+  }
+
+  /// 从版本创建新文档
+  Future<void> _createNewDocFromVersion(DocumentVersion version) async {
+    try {
+      final newFilePath = await _versionService.createNewDocFromVersion(
+        widget.filePath,
+        version.versionNumber,
+      );
+
+      if (!mounted) return;
+
+      // 关闭所有覆盖层
+      _diffOverlayEntry?.remove();
+      _diffOverlayEntry = null;
+      _closeVersionHistory();
+
+      // 跳转到新文档
+      await EditorNavigationHelper.openEditor(context, newFilePath);
+    } catch (e) {
+      appDebugLog('[Version] 创建新文档失败: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('创建新文档失败: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _mergeDebouncer.dispose();
+    _autoSaveTimer?.cancel();
+    _editScrollTimer?.cancel();
+    _searchDebounceTimer?.cancel();
+    _actionFeedbackTimer?.cancel();
+    _wordCountDebounce?.cancel();
+    _hideFloatingButtonsTimer?.cancel();
+    _blurFallbackTimer?.cancel();
+
+    // 移除所有 listener，使用标志位防止重复移除
+    if (_textListenerAttached) {
+      _textController.removeListener(_onTextChanged);
+      _textListenerAttached = false;
+    }
+    if (_editSelectionListenerAttached) {
+      _textController.removeListener(_onEditSelectionChanged);
+      _editSelectionListenerAttached = false;
+    }
+    _textController.dispose();
+    _searchController.dispose();
+    _editScrollController.dispose();
+    _undoController.dispose();
+    _searchFocusNode
+      ..removeListener(_onSearchFocusChanged)
+      ..dispose();
+    _editFocusNode
+      ..removeListener(_onEditFocusChanged)
+      ..dispose();
+    _inlineEditFocusNode.removeListener(_onInlineEditFocusChanged);
+    _inlineEditController.dispose();
+    _inlineEditFocusNode.dispose();
+    _highlightController.dispose();
+    super.dispose();
+  }
+
+  double _lastKeyboardInset = 0;
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    // 使用 WidgetsBinding.instance.scheduleFrameCallback 确保在帧更新后获取正确的键盘高度
+    WidgetsBinding.instance.scheduleFrameCallback((_) {
+      if (!mounted) return;
+      final keyboardInset = MediaQuery.of(context).viewInsets.bottom;
+      _pushPreviewOcclusion();
+      // 键盘弹出时（高度增加），触发光标滚动
+      if (keyboardInset > _lastKeyboardInset && keyboardInset > 0) {
+        if (_mode == EditorMode.edit && _editFocusNode.hasFocus) {
+          _scheduleEditScrollToCursor();
+        } else if (_mode == EditorMode.preview) {
+          // WebView 端在中文输入法组合期间会跳过常规光标同步，
+          // 这里在键盘弹出时显式通知 Milkdown 强制滚动到光标。
+          _previewWebViewController.forceCaretIntoView();
+        }
+      }
+      _lastKeyboardInset = keyboardInset;
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _isAppInBackground =
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive;
+
+    // 应用从后台恢复时，检查 inline edit 是否还需要收尾
+    if (state == AppLifecycleState.resumed && _editingBlockIndex != null) {
+      // 给一个短暂窗口让 focus 恢复，如果仍然失焦则完成编辑
+      Future.delayed(const Duration(milliseconds: 300), () {
+        if (mounted &&
+            _editingBlockIndex != null &&
+            !_inlineEditFocusNode.hasFocus) {
+          _finishInlineEdit();
+        }
+      });
+    }
+  }
+
+  Future<bool> _onWillPop() async {
+    final l10n = AppLocalizations.of(context)!;
+    _flushPendingMilkdownMerge();
+    if (_editingBlockIndex != null) {
+      _finishInlineEdit();
+    }
+    if (!_isModified) return true;
+
+    // 检查是否启用了退出时自动保存
+    final settings = context.read<SettingsProvider>();
+    if (settings.saveOnExit) {
+      await _saveFile(showSnackbar: false);
+      return true;
+    }
+
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.orange.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.warning_amber, color: Colors.orange),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(l10n.unsavedChanges, overflow: TextOverflow.ellipsis),
+            ),
+          ],
+        ),
+        content: Text(l10n.unsavedChangesMessage),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'discard'),
+            child: Text(l10n.discard),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'cancel'),
+            child: Text(l10n.cancel),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(context, 'save'),
+            icon: const Icon(Icons.save, size: 18),
+            label: Text(l10n.save),
+          ),
+        ],
+      ),
+    );
+
+    if (result == 'save') {
+      await _saveFile();
+      return true;
+    } else if (result == 'discard') {
+      return true;
+    }
+    return false;
+  }
+
+  // ==================== 搜索功能 ====================
+
+  void _showInlineSearch() {
+    if (_showToc) {
+      _tocOverlayController.close();
+    }
+    setState(() => _showSearchBar = true);
+    _performInlineSearch(_searchController.text);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _searchFocusNode.requestFocus();
+      }
+    });
+  }
+
+  void _onSearchFocusChanged() {
+    if (!mounted || !_showSearchBar) return;
+    setState(() {
+      _showSearchCandidates =
+          _searchFocusNode.hasFocus && _searchController.text.trim().isNotEmpty;
+    });
+  }
+
+  /// 执行内联搜索（带防抖）
+  void _performInlineSearch(String query) {
+    // 取消之前的防抖 Timer
+    _searchDebounceTimer?.cancel();
+
+    // 延迟 150ms 执行搜索，避免频繁搜索
+    _searchDebounceTimer = Timer(const Duration(milliseconds: 150), () {
+      _executeSearch(query);
+
+      // Clear or apply highlights in WebView
+      if (_mode == EditorMode.preview) {
+        if (query.trim().isEmpty) {
+          _previewWebViewController.execCmd('search_clear');
+        } else {
+          _previewWebViewController.execCmd(
+            'search_highlight',
+            args: {
+              'query': query.trim(),
+              'caseSensitive': _searchOptions.caseSensitive,
+              'wholeWord': _searchOptions.wholeWord,
+              'useRegex': _searchOptions.useRegex,
+            },
+          );
+        }
+      }
+    });
+  }
+
+  /// 实际执行搜索
+  Future<void> _executeSearch(String query) async {
+    if (!mounted) return;
+
+    final normalizedQuery = query.trim();
+    if (normalizedQuery.isEmpty) {
+      setState(() {
+        _searchMatches = const [];
+        _activeSearchMatchIndex = -1;
+        _showSearchCandidates = false;
+      });
+      return;
+    }
+
+    final text = _textController.text;
+    final matches = <SearchMatch>[];
+
+    // 限制搜索时间，防止超大文件卡顿
+    final startTime = DateTime.now();
+    const maxSearchTime = Duration(milliseconds: 500);
+    const maxResults = 100;
+
+    try {
+      if (_searchOptions.useRegex) {
+        // 正则表达式搜索
+        final regex = RegExp(
+          normalizedQuery,
+          caseSensitive: _searchOptions.caseSensitive,
+        );
+        for (final match in regex.allMatches(text)) {
+          if (matches.length >= maxResults) break;
+          if (DateTime.now().difference(startTime) > maxSearchTime) break;
+          final start = (match.start - 20).clamp(0, text.length);
+          final end = (match.end + 20).clamp(0, text.length);
+          final preview = text.substring(start, end).replaceAll('\n', ' ');
+          matches.add(
+            SearchMatch(
+              position: match.start,
+              length: match.end - match.start,
+              preview: preview,
+              occurrence: matches.length,
+            ),
+          );
+        }
+      } else if (_searchOptions.wholeWord) {
+        // 全词匹配
+        final wordPattern = RegExp(
+          r'\b' + RegExp.escape(normalizedQuery) + r'\b',
+          caseSensitive: _searchOptions.caseSensitive,
+        );
+        for (final match in wordPattern.allMatches(text)) {
+          if (matches.length >= maxResults) break;
+          if (DateTime.now().difference(startTime) > maxSearchTime) break;
+          final start = (match.start - 20).clamp(0, text.length);
+          final end = (match.end + 20).clamp(0, text.length);
+          final preview = text.substring(start, end).replaceAll('\n', ' ');
+          matches.add(
+            SearchMatch(
+              position: match.start,
+              length: match.end - match.start,
+              preview: preview,
+              occurrence: matches.length,
+            ),
+          );
+        }
+      } else {
+        // 普通子串搜索
+        final searchText = _searchOptions.caseSensitive
+            ? text
+            : text.toLowerCase();
+        final searchQuery = _searchOptions.caseSensitive
+            ? normalizedQuery
+            : normalizedQuery.toLowerCase();
+        var index = 0;
+
+        while (matches.length < maxResults) {
+          if (DateTime.now().difference(startTime) > maxSearchTime) {
+            appDebugLog('搜索超时，已找到 ${matches.length} 个结果');
+            break;
+          }
+
+          index = searchText.indexOf(searchQuery, index);
+          if (index == -1) break;
+          final start = (index - 20).clamp(0, text.length);
+          final end = (index + searchQuery.length + 20).clamp(0, text.length);
+          final preview = text.substring(start, end).replaceAll('\n', ' ');
+          matches.add(
+            SearchMatch(
+              position: index,
+              length: searchQuery.length,
+              preview: preview,
+              occurrence: matches.length,
+            ),
+          );
+          index += searchQuery.length;
+        }
+      }
+    } catch (e) {
+      // 无效的正则表达式或其他错误
+      appDebugLog('搜索错误: $e');
+    }
+
+    if (!mounted) return;
+
+    // 添加到搜索历史（非阻塞，后台执行）
+    if (matches.isNotEmpty) {
+      unawaited(
+        _searchHistoryService.addQuery(normalizedQuery).then((_) {
+          if (mounted) return _loadSearchHistory();
+        }),
+      );
+    }
+
+    setState(() {
+      _searchMatches = matches;
+      _activeSearchMatchIndex = matches.isEmpty ? -1 : 0;
+      _showSearchCandidates =
+          _searchFocusNode.hasFocus && normalizedQuery.isNotEmpty;
+    });
+  }
+
+  /// 更新搜索选项
+  Future<void> _updateSearchOptions(SearchOptions options) async {
+    if (_searchOptions == options) return;
+    setState(() => _searchOptions = options);
+    // 使用新选项重新搜索
+    await _executeSearch(_searchController.text);
+    // 更新 WebView 高亮
+    if (_mode == EditorMode.preview) {
+      final query = _searchController.text.trim();
+      if (query.isNotEmpty) {
+        _previewWebViewController.execCmd(
+          'search_highlight',
+          args: {
+            'query': query,
+            'caseSensitive': options.caseSensitive,
+            'wholeWord': options.wholeWord,
+            'useRegex': options.useRegex,
+          },
+        );
+      }
+    }
+  }
+
+  /// 处理搜索历史选择
+  Future<void> _onHistorySelected(String query) async {
+    await _searchHistoryService.addQuery(query);
+    await _loadSearchHistory();
+  }
+
+  void _jumpToSearchMatch(SearchMatch match) {
+    _searchFocusNode.unfocus();
+    if (_showSearchCandidates) {
+      setState(() => _showSearchCandidates = false);
+    }
+    _jumpToSearchOccurrence(match.occurrence);
+    _refocusEditorAfterSearch();
+  }
+
+  /// 搜索栏失焦后重新聚焦编辑器，恢复 IME 输入链路。
+  ///
+  /// 搜索确实输入过内容时，Android WebView 的 IME 连接可能失效，
+  /// 需要重载页面重建输入连接。
+  void _refocusEditorAfterSearch() {
+    appDebugLog('[EDITOR] refocus after search');
+    Future<void>.delayed(const Duration(milliseconds: 100), () async {
+      if (!mounted || _showSearchBar) return;
+      if (_mode == EditorMode.preview) {
+        await _previewWebViewController.execCmd('blur_editor');
+        await _previewWebViewController.clearFocus();
+        _previewWebViewController.focusEditor();
+      } else {
+        _editFocusNode.requestFocus();
+      }
+    });
+  }
+
+  void _jumpToSearchOccurrence(int occurrence) {
+    if (_searchMatches.isEmpty) return;
+    final clamped = occurrence.clamp(0, _searchMatches.length - 1).toInt();
+    final match = _searchMatches[clamped];
+    if (_mode == EditorMode.preview) {
+      final query = _searchController.text.trim();
+      if (query.isNotEmpty) {
+        _previewWebViewController.execCmd(
+          'search_jump',
+          args: {'query': query, 'occurrence': clamped},
+        );
+      }
+      setState(() => _activeSearchMatchIndex = clamped);
+      return;
+    }
+
+    final position = match.position;
+    final length = match.length;
+    _textController.selection = TextSelection(
+      baseOffset: position,
+      extentOffset: position + length,
+    );
+
+    final lineNumber =
+        (_textController.text.substring(0, position).split('\n').length - 1)
+            .clamp(0, 1 << 20)
+            .toInt();
+    _flashLineHighlight(lineNumber);
+
+    if (_editScrollController.hasClients) {
+      final lines = _textController.text.substring(0, position).split('\n');
+      const lineHeight = 24.0;
+      final targetScroll = lines.length * lineHeight - _jumpTopOffset;
+      _editScrollController.jumpTo(
+        targetScroll.clamp(0.0, _editScrollController.position.maxScrollExtent),
+      );
+    }
+
+    setState(() => _activeSearchMatchIndex = clamped);
+  }
+
+  void _jumpToNextSearchMatch() {
+    if (_searchMatches.isEmpty) return;
+    final next = _activeSearchMatchIndex < 0
+        ? 0
+        : (_activeSearchMatchIndex + 1) % _searchMatches.length;
+    _jumpToSearchOccurrence(next);
+  }
+
+  void _jumpToPrevSearchMatch() {
+    if (_searchMatches.isEmpty) return;
+    final prev = _activeSearchMatchIndex < 0
+        ? 0
+        : (_activeSearchMatchIndex - 1 + _searchMatches.length) %
+              _searchMatches.length;
+    _jumpToSearchOccurrence(prev);
+  }
+
+  void _closeSearch() {
+    // 释放 Flutter 搜索框遗留的 IME client，避免后续键盘事件仍路由到旧连接。
+    unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.hide'));
+    unawaited(
+      SystemChannels.textInput.invokeMethod<void>('TextInput.clearClient'),
+    );
+    // Clear highlights in WebView
+    if (_mode == EditorMode.preview) {
+      _previewWebViewController.execCmd('search_clear');
+    }
+
+    setState(() {
+      _showSearchBar = false;
+      _searchMatches = const [];
+      _activeSearchMatchIndex = -1;
+      _showSearchCandidates = false;
+    });
+    _refocusEditorAfterSearch();
+  }
+
+  // ==================== 复选框和链接处理 ====================
+
+  void _toggleCheckbox(int index, bool newValue) {
+    appDebugLog(
+      '[CHECKBOX] Flutter _toggleCheckbox called: index=$index, newValue=$newValue',
+    );
+    // 防御性检查：索引必须非负
+    if (index < 0) {
+      appDebugLog('[CHECKBOX] 忽略无效的复选框索引: $index');
+      return;
+    }
+    final currentText = _textController.text;
+    // 防御性检查：确认文档中的复选框数量足够
+    final totalCheckboxes = _countCheckboxes(currentText);
+    if (index >= totalCheckboxes) {
+      appDebugLog(
+        '[CHECKBOX] 复选框索引越界: index=$index, total=$totalCheckboxes，'
+        '可能是 WebView 和 Flutter 侧文档状态不同步',
+      );
+      return;
+    }
+    final newText = toggleCheckboxInText(currentText, index, newValue);
+    if (newText != null) {
+      _previewWebViewController.suppressNextReload();
+      _textController.removeListener(_onTextChanged);
+      _textController.text = newText;
+      _textController.addListener(_onTextChanged);
+      setState(() => _isModified = true);
+      appDebugLog('[CHECKBOX] Checkbox toggled successfully');
+    } else {
+      appDebugLog(
+        '[CHECKBOX] toggleCheckboxInText returned null - checkbox not found',
+      );
+    }
+  }
+
+  /// 统计文档中的复选框总数（防御性辅助方法）
+  int _countCheckboxes(String text) {
+    int count = 0;
+    for (final line in text.split('\n')) {
+      if (uncheckedBoxRegex.hasMatch(line) || checkedBoxRegex.hasMatch(line)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  void _handleLinkTap(String text, String? href, String title) {
+    final normalizedHref = href?.trim() ?? '';
+    final normalizedText = text.trim();
+
+    // Handle anchor links (internal document links like #4-下载流程)
+    if (normalizedHref.startsWith('#')) {
+      // Safely decode URI component - may fail for non-encoded strings
+      String headingFragment;
+      try {
+        headingFragment = Uri.decodeComponent(
+          normalizedHref.substring(1),
+        ).trim();
+      } catch (e) {
+        // If decoding fails, use the raw fragment
+        headingFragment = normalizedHref.substring(1).trim();
+        appDebugLog('[LINK] URI decode failed, using raw fragment: $e');
+      }
+
+      if (headingFragment.isNotEmpty) {
+        appDebugLog('[LINK] href="$href" fragment="$headingFragment"');
+        appDebugLog('[LINK] TOC items count: ${_tocItems.length}');
+        for (var i = 0; i < _tocItems.length; i++) {
+          final item = _tocItems[i];
+          appDebugLog(
+            '[LINK] TOC[$i]: title="${item.title}" slug="${slugifyHeading(item.title)}" line=${item.lineNumber}',
+          );
+        }
+
+        // Try multiple matching strategies
+        bool jumped = false;
+
+        for (var i = 0; i < _tocItems.length; i++) {
+          final item = _tocItems[i];
+          final itemTitle = item.title;
+
+          // Strategy 1: Direct slugified comparison
+          final normalizedFragment = slugifyHeading(headingFragment);
+          final normalizedTitle = slugifyHeading(itemTitle);
+          if (normalizedTitle == normalizedFragment) {
+            appDebugLog('[LINK] Matched by slug: "$normalizedTitle"');
+            _jumpToHeading(i, item);
+            jumped = true;
+            break;
+          }
+
+          // Strategy 2: Match anchor fragment against original title (with number prefix)
+          // e.g., "#4-下载流程" matches "4. 下载流程"
+          final titleWithDot = itemTitle.trim();
+          final anchorWithHyphen = headingFragment.replaceAll('-', ' ');
+          if (slugifyHeading(titleWithDot) ==
+              slugifyHeading(anchorWithHyphen)) {
+            appDebugLog(
+              '[LINK] Matched by normalized: "$titleWithDot" ~ "$anchorWithHyphen"',
+            );
+            _jumpToHeading(i, item);
+            jumped = true;
+            break;
+          }
+
+          // Strategy 3: Extract text content and compare
+          // e.g., "#4-下载流程" -> "下载流程" matches "4. 下载流程" -> "下载流程"
+          final fragmentTextOnly = headingFragment
+              .replaceFirst(RegExp(r'^\d+[\.\-\s]+'), '')
+              .replaceAll('-', ' ')
+              .trim();
+          final titleTextOnly = itemTitle
+              .replaceFirst(RegExp(r'^\d+[\.\-\s]+'), '')
+              .trim();
+          if (slugifyHeading(fragmentTextOnly) ==
+              slugifyHeading(titleTextOnly)) {
+            appDebugLog(
+              '[LINK] Matched by text: "$fragmentTextOnly" ~ "$titleTextOnly"',
+            );
+            _jumpToHeading(i, item);
+            jumped = true;
+            break;
+          }
+        }
+
+        // Fallback: try to find heading by partial match or line number in anchor
+        if (!jumped) {
+          // Handle anchors like "#4-下载流程" where "4" might indicate heading number
+          final lineMatch = RegExp(
+            r'^(\d+)[\-\s\.]',
+          ).firstMatch(headingFragment);
+          if (lineMatch != null) {
+            final targetLine = int.tryParse(lineMatch.group(1) ?? '');
+            if (targetLine != null &&
+                targetLine > 0 &&
+                targetLine <= _tocItems.length) {
+              appDebugLog('[LINK] Matched by line number: $targetLine');
+              _jumpToHeading(targetLine - 1, _tocItems[targetLine - 1]);
+              jumped = true;
+            }
+          }
+        }
+
+        // Final fallback: try direct scroll via WebView command
+        if (!jumped) {
+          appDebugLog('[LINK] No match found, trying scroll_to_anchor');
+          _previewWebViewController.execCmd(
+            'scroll_to_anchor',
+            args: {'anchor': headingFragment},
+          );
+        }
+      }
+      return;
+    }
+
+    // Handle empty href - try to use link text as heading reference
+    if (normalizedHref.isEmpty && normalizedText.isNotEmpty) {
+      final normalizedFragment = slugifyHeading(normalizedText);
+      for (var i = 0; i < _tocItems.length; i++) {
+        final item = _tocItems[i];
+        if (slugifyHeading(item.title) == normalizedFragment) {
+          _jumpToHeading(i, item);
+          return;
+        }
+      }
+      return;
+    }
+
+    if (normalizedHref.isEmpty) return;
+
+    // Handle .md file links
+    if (normalizedHref.endsWith('.md') ||
+        normalizedHref.endsWith('.markdown')) {
+      if (!normalizedHref.contains('..')) {
+        final baseDir = File(widget.filePath).parent.path;
+        final targetPath =
+            '$baseDir${Platform.pathSeparator}${normalizedHref.replaceAll('/', Platform.pathSeparator)}';
+        final targetFile = File(targetPath);
+        if (targetFile.existsSync()) {
+          EditorNavigationHelper.openEditor(context, targetPath);
+          return;
+        }
+      }
+    }
+
+    // Handle external URLs
+    final uri = Uri.tryParse(normalizedHref);
+    if (uri != null && (uri.scheme == 'http' || uri.scheme == 'https')) {
+      try {
+        launchUrl(uri, mode: LaunchMode.externalApplication);
+      } catch (e) {
+        appDebugLog('打开链接失败: $e');
+      }
+    }
+  }
+
+  void _showImagePreview(OnImageClickPayload payload) async {
+    var src = payload.src;
+    if (src.isEmpty) return;
+
+    // Handle ushio-local-file:// scheme
+    if (src.startsWith('ushio-local-file://')) {
+      final uri = Uri.parse(src);
+      src = uri.queryParameters['path'] ?? src;
+    }
+
+    // Resolve relative paths relative to the document's directory
+    if (!src.startsWith('/') &&
+        !src.startsWith('http://') &&
+        !src.startsWith('https://') &&
+        !src.startsWith('data:')) {
+      final baseDir = File(widget.filePath).parent.path;
+      src = '$baseDir${Platform.pathSeparator}$src';
+    }
+
+    Widget imageWidget;
+
+    if (src.startsWith('http://') ||
+        src.startsWith('https://') ||
+        src.startsWith('data:')) {
+      // Network or data URL
+      imageWidget = Image.network(
+        src,
+        fit: BoxFit.contain,
+        errorBuilder: (context, error, stackTrace) {
+          return Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.broken_image, size: 48, color: Colors.grey),
+                const SizedBox(height: 8),
+                Text('图片加载失败', style: TextStyle(color: Colors.grey[600])),
+              ],
+            ),
+          );
+        },
+      );
+    } else {
+      // Local file
+      var file = File(src);
+      bool exists = await file.exists();
+
+      // Try URL-decoded path if original doesn't exist
+      if (!exists) {
+        final decodedPath = Uri.decodeComponent(src);
+        file = File(decodedPath);
+        exists = await file.exists();
+      }
+
+      if (exists) {
+        imageWidget = Image.file(file, fit: BoxFit.contain);
+      } else {
+        imageWidget = Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.broken_image, size: 48, color: Colors.grey),
+              const SizedBox(height: 8),
+              Text('文件不存在', style: TextStyle(color: Colors.grey[600])),
+              const SizedBox(height: 4),
+              Text(
+                payload.src,
+                style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        );
+      }
+    }
+
+    if (!mounted) return;
+
+    await showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(16),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // Image container
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Container(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.8,
+                  maxWidth: MediaQuery.of(context).size.width * 0.9,
+                ),
+                color: Colors.black87,
+                child: InteractiveViewer(
+                  minScale: 0.5,
+                  maxScale: 4.0,
+                  child: imageWidget,
+                ),
+              ),
+            ),
+            // Close button
+            Positioned(
+              top: 0,
+              right: 0,
+              child: IconButton(
+                onPressed: () => Navigator.pop(context),
+                icon: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Icon(Icons.close, color: Colors.white),
+                ),
+              ),
+            ),
+            // Alt text (if available)
+            if (payload.alt != null && payload.alt!.isNotEmpty)
+              Positioned(
+                bottom: 0,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    payload.alt!,
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ==================== Milkdown WebView ====================
+
+  void _handleMilkdownContentChange(String markdown) {
+    if (!_isMilkdownReady) return;
+    _pendingMilkdownMarkdown = markdown;
+    final seq = ++_milkdownChangeSeq;
+    _mergeDebouncer.run(() => _applyMilkdownContentChange(markdown, seq));
+  }
+
+  void _applyMilkdownContentChange(String markdown, int seq) {
+    if (!mounted || seq != _milkdownChangeSeq) return;
+    if (!_isMilkdownReady) {
+      if (identical(_pendingMilkdownMarkdown, markdown) ||
+          _pendingMilkdownMarkdown == markdown) {
+        _pendingMilkdownMarkdown = null;
+      }
+      return;
+    }
+    if (identical(_pendingMilkdownMarkdown, markdown) ||
+        _pendingMilkdownMarkdown == markdown) {
+      _pendingMilkdownMarkdown = null;
+    }
+
+    // Apply incremental merge to preserve original formatting
+    String finalMarkdown = markdown;
+    if (_enableIncrementalMerge && _originalMarkdown.isNotEmpty) {
+      final result = incrementalMerge(
+        original: _originalMarkdown,
+        newContent: markdown,
+      );
+      finalMarkdown = result.content;
+
+      // Log merge statistics for debugging
+      if (result.hasChanges) {
+        appDebugLog(
+          '[INCREMENTAL_MERGE] Preserved ${result.preservedBlocks} blocks, '
+          'replaced ${result.replacedBlocks} blocks',
+        );
+      }
+    }
+
+    if (finalMarkdown == _textController.text) return;
+    // This change originated from the live Milkdown editor. Updating the
+    // Flutter controller rebuilds this screen with a new initialMarkdown value,
+    // but echoing that value back through init_doc would replace the ProseMirror
+    // document and move the caret to the end while the user is typing.
+    _previewWebViewController.suppressNextReload();
+    _textController.removeListener(_onTextChanged);
+    _textController.text = finalMarkdown;
+    _textController.addListener(_onTextChanged);
+    // Set _isApplyingHistory to prevent this Milkdown-originated change from
+    // being recorded as a new Flutter-side history snapshot. Without this,
+    // ProseMirror undos would pollute the Flutter undo stack.
+    _isApplyingHistory = true;
+    _onTextChanged();
+    _isApplyingHistory = false;
+  }
+
+  /// 立即执行待处理的 Milkdown 增量合并，保证保存/退出时内容一致。
+  void _flushPendingMilkdownMerge() {
+    final pending = _pendingMilkdownMarkdown;
+    if (pending == null) return;
+    _pendingMilkdownMarkdown = null;
+    final seq = _milkdownChangeSeq;
+    _mergeDebouncer.cancel();
+    _applyMilkdownContentChange(pending, seq);
+  }
+
+  Color _documentTextColor(SettingsProvider settings) =>
+      settings.editorFontColorFor(Theme.of(context).brightness);
+
+  Widget _buildInlineEditablePreview(SettingsProvider settings) {
+    if (_hidePlatformViews) return const SizedBox.expand();
+    return MilkdownWebViewEditor(
+      initialMarkdown: _mode == EditorMode.edit
+          ? _webViewMarkdownInEdit
+          : _textController.text,
+      readOnly: false,
+      fontSize: settings.fontSize,
+      lineHeight: settings.lineHeight,
+      letterSpacing: settings.letterSpacing,
+      paragraphSpacing: settings.paragraphSpacing,
+      bodyFont: settings.editorFontFamily == 'System'
+          ? null
+          : settings.editorFontFamily,
+      monoFont: settings.codeFontFamily == 'System'
+          ? null
+          : settings.codeFontFamily,
+      baseDirectory: File(widget.filePath).parent.path,
+      textColor: _documentTextColor(settings),
+      onContentChange: _handleMilkdownContentChange,
+      onOutlineUpdate: _handleOutlineUpdate,
+      onLinkClick: (payload) =>
+          _handleLinkTap(payload.text ?? '', payload.href, payload.title ?? ''),
+      onImageClick: _showImagePreview,
+      onCheckboxToggle: _toggleCheckbox,
+      onHistoryState: _onPreviewHistoryState,
+      onBridgeMessage: _handleMilkdownBridgeMessage,
+      onRenderProgress: (progress) {
+        appDebugLog('[EDITOR] preview render progress: $progress');
+      },
+      onRenderTimeout: () {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('渲染较慢，仍在加载，可继续等待或返回'),
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
+      },
+      onRenderTimeoutExit: () {
+        if (mounted) {
+          Navigator.of(context).pop();
+        }
+      },
+      controller: _previewWebViewController,
+      codeBlockTheme:
+          AppConstants.codeBlockThemes[settings.codeBlockThemeIndex].themeId,
+    );
+  }
+
+  void _handleMilkdownBridgeMessage(Map<String, dynamic> map) {
+    final type = map['type']?.toString();
+    if (type == 'on_ready') {
+      _isMilkdownReady = true;
+      _pushPreviewOcclusion();
+      return;
+    }
+    if (type != 'on_editor_focus') return;
+    final payload = map['payload'];
+    if (payload is! Map) return;
+    final focused = payload['focused'] == true;
+    if (!mounted || focused == _isMilkdownEditorFocused) return;
+    setState(() => _isMilkdownEditorFocused = focused);
+    // WebView 正常响应了 focus 变化，取消降级计时器
+    if (!focused) _blurFallbackTimer?.cancel();
+
+    // Hide floating buttons when Milkdown editor gains focus
+    if (focused) {
+      _hideFloatingButtons();
+      _showFloatingButtonsAfterDelay();
+    }
+  }
+
+  // ==================== 内联编辑 ====================
+
+  void _finishInlineEdit() {
+    if (_editingBlockIndex == null) return;
+
+    final blocks = parseMarkdownBlocks(_textController.text);
+    final editingIndex = _editingBlockIndex!;
+
+    setState(() => _editingBlockIndex = null);
+
+    if (editingIndex < blocks.length) {
+      final block = blocks[editingIndex];
+      final lines = _textController.text.split('\n');
+      final editedLines = _inlineEditController.text.split('\n');
+      final newLines = <String>[
+        ...lines.sublist(0, block.startLine),
+        ...editedLines,
+        if (block.endLine + 1 < lines.length)
+          ...lines.sublist(block.endLine + 1),
+      ];
+
+      final newText = newLines.join('\n');
+      if (newText != _textController.text) {
+        final caretOffset = newLines
+            .take(block.startLine + editedLines.length)
+            .join('\n')
+            .length
+            .clamp(0, newText.length)
+            .toInt();
+        _applyMainTextWithSelection(
+          newText,
+          TextSelection.collapsed(offset: caretOffset),
+        );
+      }
+    }
+  }
+
+  void _applyMainTextWithSelection(String newText, TextSelection selection) {
+    _isApplyingHistory = true;
+    _textController.value = TextEditingValue(
+      text: newText,
+      selection: _safeSelection(selection, newText.length),
+    );
+    _isApplyingHistory = false;
+    _recordHistorySnapshot(text: newText, selection: selection);
+  }
+
+  void _onInlineEditFocusChanged() {
+    if (!_inlineEditFocusNode.hasFocus && _editingBlockIndex != null) {
+      // 应用切到后台导致的失焦不应结束 inline edit，
+      // 等应用恢复后由 didChangeAppLifecycleState 处理
+      if (_isAppInBackground) return;
+      _finishInlineEdit();
+    }
+  }
+
+  // ==================== UI 构建 ====================
+
+  /// 退场动画期间保留最后一帧，动画播完再销毁平台视图。
+  ///
+  /// 一按返回就把内容抽掉，会被看成「白一下再滑走」的卡顿；提前销毁并不会让退出
+  /// 变快，只是把销毁的代价挪进了动画中间。
+  void _schedulePlatformViewTeardown() {
+    final animation = ModalRoute.of(context)?.animation;
+    if (animation == null || animation.status == AnimationStatus.dismissed) {
+      _hidePlatformViewsNow();
+      return;
+    }
+    animation.addStatusListener(_onRouteExitStatus);
+  }
+
+  void _onRouteExitStatus(AnimationStatus status) {
+    if (status != AnimationStatus.dismissed) return;
+    ModalRoute.of(context)?.animation?.removeStatusListener(_onRouteExitStatus);
+    _hidePlatformViewsNow();
+  }
+
+  void _hidePlatformViewsNow() {
+    if (mounted && !_hidePlatformViews) {
+      setState(() => _hidePlatformViews = true);
+    }
+  }
+
+  /// 系统返回（侧滑手势 / 金刚键）的第一下只负责收起当前编辑态，不退出页面。
+  ///
+  /// 左上角箭头走 Navigator.pop，它不查 Route.popDisposition，因此不受
+  /// PopScope.canPop 影响，始终直接退到上一页——两者职责由此分开。
+  Future<void> _collapseEditingState() async {
+    if (_editingBlockIndex != null) {
+      _finishInlineEdit();
+      _inlineEditFocusNode.unfocus();
+      return;
+    }
+    if (_mode == EditorMode.edit) {
+      _editFocusNode.unfocus();
+      _enterPreviewMode();
+      return;
+    }
+    await _previewWebViewController.execCmd('blur_editor');
+    if (mounted) {
+      setState(() => _isMilkdownEditorFocused = false);
+    }
+    // 超时降级：如果 WebView 在 800ms 内没有响应 blur_editor
+    // （即没有回传 on_editor_focus: false），强制取消焦点并返回，
+    // 防止用户被卡在无法退出的状态
+    _blurFallbackTimer?.cancel();
+    _blurFallbackTimer = Timer(const Duration(milliseconds: 800), () {
+      if (mounted && _isMilkdownEditorFocused) {
+        setState(() => _isMilkdownEditorFocused = false);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    appDebugLog(
+      '[EDITOR] build() called - _isLoading: $_isLoading, _error: $_error, _mode: $_mode',
+    );
+
+    // 任何编辑面（编辑态 / 内联块编辑 / 预览里已落光标）在场时，返回先收起它。
+    final hasActiveEditingSurface =
+        _mode == EditorMode.edit ||
+        _editingBlockIndex != null ||
+        _isMilkdownEditorFocused;
+    final useCustomTitleBar =
+        Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+
+    return PopScope(
+      canPop: !_isModified && !hasActiveEditingSurface,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) {
+          _schedulePlatformViewTeardown();
+          return;
+        }
+        if (hasActiveEditingSurface) {
+          await _collapseEditingState();
+          return;
+        }
+        if (!didPop) {
+          final shouldPop = await _onWillPop();
+          if (shouldPop && context.mounted) {
+            _schedulePlatformViewTeardown();
+            Navigator.of(context).pop();
+          }
+        }
+      },
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        backgroundColor: Colors.transparent,
+        body: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (_buildEditorBackgroundLayer(context.watch<SettingsProvider>())
+                case final editorBackground)
+              Positioned.fill(child: RepaintBoundary(child: editorBackground)),
+            Column(
+              children: [
+                if (useCustomTitleBar)
+                  CustomTitleBar(fileName: fileName, isEditorMode: true),
+                Expanded(
+                  child: CallbackShortcuts(
+                    bindings: buildShortcutBindings(
+                      onSave: _saveFile,
+                      onUndo: _undoEditHistory,
+                      onRedo: _redoEditHistory,
+                      onSearch: _showInlineSearch,
+                      onApplyAction: (action) {
+                        // 预览模式下，格式快捷键由 WebView 内的 ProseMirror
+                        // 自行处理（capture 阶段拦截），Flutter 侧不再转发，
+                        // 避免双重执行（execCmd + JS handleEditorShortcut）。
+                        if (_mode == EditorMode.preview &&
+                            _editingBlockIndex == null) {
+                          return;
+                        }
+                        _applyToolbarAction(action);
+                      },
+                      onEscape: _closeSearch,
+                      onNextSearchMatch: _jumpToNextSearchMatch,
+                      onPrevSearchMatch: _jumpToPrevSearchMatch,
+                    ),
+                    child: Stack(
+                      children: [
+                        _buildBody(),
+                        if (!_isLoading && _error == null)
+                          _buildFixedFloatingButtons(),
+                        if (_showToc)
+                          TocOverlay(
+                            items: _tocItems,
+                            onClose: () => setState(() => _showToc = false),
+                            onJumpToHeading: _jumpToHeading,
+                            controller: _tocOverlayController,
+                            currentHeadingIndex: _currentTocIndex,
+                            keepOpenOnJump: false,
+                          ),
+                        // 版本历史和 Diff 视图在浮动按钮之上
+                        if (_showVersionHistoryOverlay)
+                          VersionHistorySheet(
+                            versions: _versions,
+                            onClose: _closeVersionHistory,
+                            onVersionSelected: _showDiffView,
+                            onVersionNoteUpdated: _updateVersionNote,
+                            controller: _versionHistoryController,
+                            isLoading: _isLoadingVersions,
+                            errorMessage: _versionErrorMessage,
+                            isModified: _isModified,
+                            onUnsavedChangesSelected: _showUnsavedChangesDiff,
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDesktopEditorFrame({required Widget child}) {
+    if (!ResponsiveLayout.isDesktopWidth(context)) {
+      return child;
+    }
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: ResponsiveLayout.editorMaxWidth(context),
+        ),
+        child: child,
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    final settings = context.watch<SettingsProvider>();
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    final isPreviewUndoRedo =
+        _mode == EditorMode.preview && _editingBlockIndex == null;
+
+    // 底部工具栏只在真正编辑时出现：预览态且无光标（无输入焦点）时隐藏。
+    final showToolbar =
+        _editingBlockIndex != null ||
+        _isMilkdownEditorFocused ||
+        _mode == EditorMode.edit;
+
+    if (_error != null && !_isLoading) {
+      return Container(
+        color: Theme.of(context).scaffoldBackgroundColor,
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.error_outline,
+                  size: 48,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  '打开文档失败：$_error',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                const SizedBox(height: 16),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('返回'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        gradient:
+            (settings.editorBackgroundImagePath == null ||
+                !settings.editorBackgroundImageExists)
+            ? Theme.of(context).extension<AppStyleTheme>()!.backgroundGradient
+            : null,
+      ),
+      child: SafeArea(
+        bottom: false,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    // 预览 WebView 是 Android 平台视图，一旦随键盘逐帧 resize 就会
+                    // 触发 Chromium 逐帧重合成（卡顿根因）。因此这里不再按键盘高度
+                    // 内缩 WebView；键盘遮挡由 WebView 内 JS（visualViewport +
+                    // 光标滚动到可视区）自行处理，WebView 尺寸保持恒定。
+                    child: _buildDesktopEditorFrame(
+                      child: _buildEditorWithGesture(),
+                    ),
+                  ),
+                  if (_showSearchBar)
+                    Positioned(
+                      top: 10,
+                      left: ResponsiveLayout.isDesktopWidth(context) ? 0 : 12,
+                      right: ResponsiveLayout.isDesktopWidth(context) ? 0 : 12,
+                      child: _buildDesktopEditorFrame(
+                        child: EditorSearchBar(
+                          controller: _searchController,
+                          focusNode: _searchFocusNode,
+                          matches: _searchMatches,
+                          activeMatchIndex: _activeSearchMatchIndex,
+                          onSearch: _performInlineSearch,
+                          onJumpToMatch: _jumpToSearchMatch,
+                          onJumpToNext: _jumpToNextSearchMatch,
+                          onJumpToPrevious: _jumpToPrevSearchMatch,
+                          onClose: _closeSearch,
+                          showCandidates: _showSearchCandidates,
+                          searchOptions: _searchOptions,
+                          onOptionsChanged: _updateSearchOptions,
+                          searchHistory: _searchHistory,
+                          onHistorySelected: _onHistorySelected,
+                        ),
+                      ),
+                    ),
+                  // Toolbar with smooth slide-up animation
+                  if (!_isLoading && _error == null)
+                    Positioned(
+                      bottom: keyboardInset,
+                      left: 0,
+                      right: 0,
+                      child: _buildDesktopEditorFrame(
+                        child: AnimatedSlide(
+                          offset: Offset(0, showToolbar ? 0 : 1),
+                          duration: const Duration(milliseconds: 150),
+                          curve: Curves.easeOutCubic,
+                          child: AnimatedOpacity(
+                            opacity: showToolbar ? 1.0 : 0.0,
+                            duration: const Duration(milliseconds: 100),
+                            curve: Curves.easeOut,
+                            child: IgnorePointer(
+                              ignoring: !showToolbar,
+                              child: MarkdownToolbar(
+                                controller: _editingBlockIndex != null
+                                    ? _inlineEditController
+                                    : _textController,
+                                undoController: isPreviewUndoRedo
+                                    ? null
+                                    : _editingBlockIndex != null
+                                    ? null
+                                    : _undoController,
+                                canUndo: _editingBlockIndex != null
+                                    ? _historyIndex > 0
+                                    : isPreviewUndoRedo
+                                    ? _previewCanUndo
+                                    : null,
+                                canRedo: _editingBlockIndex != null
+                                    ? (_historyIndex >= 0 &&
+                                          _historyIndex <
+                                              _editHistory.length - 1)
+                                    : isPreviewUndoRedo
+                                    ? _previewCanRedo
+                                    : null,
+                                onUndo: _editingBlockIndex != null
+                                    ? _undoEditHistory
+                                    : isPreviewUndoRedo
+                                    ? () {
+                                        _undoEditHistory();
+                                      }
+                                    : null,
+                                onRedo: _editingBlockIndex != null
+                                    ? _redoEditHistory
+                                    : isPreviewUndoRedo
+                                    ? () {
+                                        _redoEditHistory();
+                                      }
+                                    : null,
+                                filePath: widget.filePath,
+                                onSearchPressed: _showInlineSearch,
+                                onAction:
+                                    _mode == EditorMode.preview &&
+                                        _editingBlockIndex == null
+                                    ? _handlePreviewToolbarAction
+                                    : null,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            // EditorHeader
+            if (!_showSearchBar)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: EditorHeader(
+                  fileName: fileName,
+                  fullFilePath: widget.filePath,
+                  wordCount: _getWordCount(),
+                  isModified: _isModified,
+                  isSaving: _isSaving,
+                  isAutoSaving: _isAutoSaving,
+                  lastSaveTime: _lastSaveTime,
+                  canUndo: _historyIndex > 0,
+                  canRedo:
+                      _historyIndex >= 0 &&
+                      _historyIndex < _editHistory.length - 1,
+                  onBack: () async {
+                    if (_isModified) {
+                      final shouldPop = await _onWillPop();
+                      if (shouldPop && mounted) {
+                        Navigator.of(context).pop();
+                      }
+                    } else {
+                      Navigator.of(context).pop();
+                    }
+                  },
+                  onSave: _saveFile,
+                  onMore: _showMoreMenu,
+                ),
+              ),
+            if (_lastActionFeedback != null)
+              Positioned(
+                top: 60,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.primaryContainer,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      _lastActionFeedback!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onPrimaryContainer,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _getWordCount() {
+    final l10n = AppLocalizations.of(context)!;
+    return l10n.wordCount(
+      _cachedCharCount,
+      _cachedGlyphCount,
+      _cachedWordCount,
+    );
+  }
+
+  Widget _buildEditorWithGesture() {
+    return Listener(
+      onPointerDown: (_) => _onUserInteraction(),
+      onPointerMove: (_) => _onUserInteraction(),
+      onPointerUp: (_) => _showFloatingButtonsAfterDelay(),
+      child: _buildEditor(includeBackground: false),
+    );
+  }
+
+  Widget _buildEditor({required bool includeBackground}) {
+    final settings = context.watch<SettingsProvider>();
+    final editorBackground = includeBackground
+        ? _buildEditorBackgroundLayer(settings)
+        : null;
+    final isDesktop = ResponsiveLayout.isDesktopWidth(context);
+    final theme = Theme.of(context);
+
+    Widget panel({required Widget child}) => ClipRRect(
+      borderRadius: BorderRadius.vertical(
+        top: Radius.circular(isDesktop ? 12 : 20),
+      ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (editorBackground != null) editorBackground,
+          Container(
+            color: editorBackground == null
+                ? theme.colorScheme.surface.withValues(
+                    alpha: theme.extension<AppStyleTheme>()!.useLiquidGlass
+                        ? 0.0
+                        : 1.0,
+                  )
+                : Colors.transparent,
+            child: child,
+          ),
+        ],
+      ),
+    );
+
+    // 两个面板都留在树里，只用 Offstage 切可见性。预览面板是 Android 平台视图，
+    // 一旦随模式切换被卸载，回到预览就要重新加载并求值整个编辑器（实测热态
+    // ~440ms、冷态 ~1.4s），而这成本会摊到每一次预览/编辑来回切换上。
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Offstage(
+          offstage: _mode != EditorMode.preview,
+          child: panel(child: _buildInlineEditablePreview(settings)),
+        ),
+        Offstage(
+          offstage: _mode != EditorMode.edit,
+          child: panel(
+            child: _buildEditPanel(
+              settings,
+              toolbarPadding: MarkdownToolbar.heightFor(context),
+              keyboardInset: MediaQuery.viewInsetsOf(context).bottom,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget? _buildEditorBackgroundLayer(SettingsProvider settings) {
+    final path = settings.editorBackgroundImagePath;
+    if (path == null || !settings.editorBackgroundImageExists) return null;
+
+    final file = File(path);
+
+    Widget imageLayer = Image.file(
+      file,
+      fit: BoxFit.cover,
+      width: double.infinity,
+      height: double.infinity,
+    );
+
+    final brightness = settings.editorBackgroundBrightness;
+    if ((brightness - 1.0).abs() > 0.001) {
+      imageLayer = ColorFiltered(
+        colorFilter: ColorFilter.matrix([
+          brightness,
+          0,
+          0,
+          0,
+          0,
+          0,
+          brightness,
+          0,
+          0,
+          0,
+          0,
+          0,
+          brightness,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+        ]),
+        child: imageLayer,
+      );
+    }
+
+    if (settings.editorBackgroundBlurEnabled) {
+      imageLayer = ImageFiltered(
+        imageFilter: ImageFilter.blur(
+          sigmaX: settings.editorBackgroundBlur,
+          sigmaY: settings.editorBackgroundBlur,
+        ),
+        child: imageLayer,
+      );
+    }
+
+    return imageLayer;
+  }
+
+  Widget _buildFixedFloatingButtons() {
+    final settings = context.watch<SettingsProvider>();
+    final safeBottom = MediaQuery.of(context).padding.bottom;
+    final isDesktop = ResponsiveLayout.isDesktopWidth(context);
+    final screenWidth = MediaQuery.of(context).size.width;
+    final editorMaxWidth = ResponsiveLayout.editorMaxWidth(context);
+    final desktopRightInset = isDesktop
+        ? ((screenWidth - editorMaxWidth) / 2 + 24).clamp(24.0, double.infinity)
+        : 24.0;
+
+    // Check floating buttons mode
+    final mode = settings.floatingButtonsMode;
+    final bool showButtons;
+
+    switch (mode) {
+      case 'always':
+        showButtons = true;
+        break;
+      case 'never':
+        showButtons = false;
+        break;
+      case 'auto':
+      default:
+        showButtons = _floatingButtonsVisible;
+        break;
+    }
+
+    switch (_mode) {
+      case EditorMode.edit:
+        final editBottom = safeBottom + 56.0 + 16.0;
+        return Positioned(
+          // -10 抵消 hitPadding 带来的外扩，保持按钮视觉位置不变
+          right: desktopRightInset - 10,
+          bottom: editBottom - 10,
+          child: showButtons
+              ? AnimatedScale(
+                  scale: 1.0,
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeOut,
+                  child: AnimatedFab(
+                    icon: Icons.visibility,
+                    color: Theme.of(context).colorScheme.primary,
+                    hitPadding: const EdgeInsets.all(10),
+                    onTap: _enterPreviewMode,
+                  ),
+                )
+              : const SizedBox.shrink(),
+        );
+      case EditorMode.preview:
+        if (_editingBlockIndex != null) return const SizedBox.shrink();
+        // 悬浮按钮列固定放在底部工具栏上方，避免遮挡“标题 1/标题 2”。
+        final previewBottom = safeBottom + 56.0 + 16.0;
+        return Positioned(
+          // -10 抵消 hitPadding 带来的外扩，保持按钮视觉位置不变
+          right: desktopRightInset - 10,
+          bottom: previewBottom - 10,
+          child: showButtons
+              ? AnimatedScale(
+                  scale: 1.0,
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeOut,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AnimatedFab(
+                        icon: Icons.edit,
+                        color: Theme.of(context).colorScheme.tertiary,
+                        hitPadding: const EdgeInsets.all(10),
+                        onTap: _enterEditMode,
+                      ),
+                      const SizedBox(height: 0),
+                      AnimatedFab(
+                        icon: Icons.list,
+                        color: Theme.of(context).colorScheme.primary,
+                        hitPadding: const EdgeInsets.all(10),
+                        onTap: () {
+                          if (_showToc) {
+                            _tocOverlayController.close();
+                            return;
+                          }
+                          setState(() => _showToc = true);
+                        },
+                      ),
+                    ],
+                  ),
+                )
+              : const SizedBox.shrink(),
+        );
+    }
+  }
+
+  Widget _buildEditPanel(
+    SettingsProvider settings, {
+    double toolbarPadding = 0,
+    double keyboardInset = 0,
+  }) {
+    final l10n = AppLocalizations.of(context)!;
+    final isDesktop = ResponsiveLayout.isDesktopWidth(context);
+    final hPad = isDesktop ? 24.0 : 16.0;
+    return Stack(
+      children: [
+        TextField(
+          controller: _textController,
+          scrollController: _editScrollController,
+          undoController: _undoController,
+          focusNode: _editFocusNode,
+          maxLines: null,
+          expands: true,
+          keyboardType: TextInputType.multiline,
+          textAlignVertical: TextAlignVertical.top,
+          scrollPhysics: const ClampingScrollPhysics(),
+          style: TextStyle(
+            color: _documentTextColor(settings),
+            fontSize: settings.fontSize,
+            fontFamily: settings.editorFontFamily == 'System'
+                ? null
+                : settings.editorFontFamily,
+            height: 1.5,
+          ),
+          decoration: InputDecoration(
+            border: InputBorder.none,
+            // 头部和工具栏都是浮在正文上的覆盖层：顶部不留出头部高度，第一行
+            // 就一直压在头部下面；底部不留出键盘高度，最后几行根本滚不进可视区。
+            contentPadding: EdgeInsets.fromLTRB(
+              hPad,
+              EditorHeader.reserveHeight + 16,
+              hPad,
+              16 + toolbarPadding + keyboardInset,
+            ),
+            hintText: l10n.startWriting,
+            hintStyle: TextStyle(
+              color: Theme.of(
+                context,
+              ).colorScheme.outline.withValues(alpha: 0.5),
+            ),
+          ),
+          onTap: _onUserInteraction,
+        ),
+        if (_highlightedLine != null && _mode == EditorMode.edit)
+          AnimatedBuilder(
+            animation: _highlightAnimation,
+            builder: (context, child) {
+              final accentColor = Theme.of(context).colorScheme.primary;
+              const lineHeight = 24.0;
+              final topPosition = _highlightedLine! * lineHeight;
+              final opacity = _highlightAnimation.value < 0.5
+                  ? _highlightAnimation.value * 2
+                  : (1 - _highlightAnimation.value) * 2;
+
+              return Positioned(
+                top: topPosition,
+                left: 0,
+                right: 0,
+                height: lineHeight,
+                child: IgnorePointer(
+                  child: Container(
+                    color: accentColor.withValues(alpha: opacity * 0.35),
+                  ),
+                ),
+              );
+            },
+          ),
+      ],
+    );
+  }
+
+  void _onPreviewHistoryState(bool canUndo, bool canRedo) {
+    if (!mounted) return;
+    if (_previewCanUndo == canUndo && _previewCanRedo == canRedo) return;
+    setState(() {
+      _previewCanUndo = canUndo;
+      _previewCanRedo = canRedo;
+    });
+  }
+
+  Future<void> _handlePreviewToolbarAction(MarkdownToolbarAction action) async {
+    if (_mode != EditorMode.preview || _editingBlockIndex != null) return;
+    if (action == MarkdownToolbarAction.search) {
+      _showInlineSearch();
+      return;
+    }
+
+    String? cmd;
+    Map<String, dynamic>? args;
+    switch (action) {
+      case MarkdownToolbarAction.undo:
+        if (!_previewCanUndo) return;
+        cmd = 'undo';
+        break;
+      case MarkdownToolbarAction.redo:
+        if (!_previewCanRedo) return;
+        cmd = 'redo';
+        break;
+      case MarkdownToolbarAction.bold:
+        cmd = 'toggle_bold';
+        break;
+      case MarkdownToolbarAction.italic:
+        cmd = 'toggle_italic';
+        break;
+      case MarkdownToolbarAction.strikethrough:
+        cmd = 'toggle_strikethrough';
+        break;
+      case MarkdownToolbarAction.heading1:
+        cmd = 'set_heading';
+        args = {'level': 1};
+        break;
+      case MarkdownToolbarAction.heading2:
+        cmd = 'set_heading';
+        args = {'level': 2};
+        break;
+      case MarkdownToolbarAction.heading3:
+        cmd = 'set_heading';
+        args = {'level': 3};
+        break;
+      case MarkdownToolbarAction.bulletList:
+        cmd = 'toggle_bullet_list';
+        break;
+      case MarkdownToolbarAction.orderedList:
+        cmd = 'toggle_ordered_list';
+        break;
+      case MarkdownToolbarAction.taskList:
+        cmd = 'toggle_bullet_list';
+        break;
+      case MarkdownToolbarAction.blockquote:
+        cmd = 'toggle_blockquote';
+        break;
+      case MarkdownToolbarAction.inlineCode:
+        cmd = 'toggle_inline_code';
+        break;
+      case MarkdownToolbarAction.codeBlock:
+        cmd = 'insert_code_block';
+        break;
+      case MarkdownToolbarAction.link:
+        cmd = 'toggle_link';
+        break;
+      case MarkdownToolbarAction.image:
+        cmd = 'insert_image_prompt';
+        break;
+      case MarkdownToolbarAction.horizontalRule:
+        cmd = 'insert_hr';
+        break;
+      case MarkdownToolbarAction.table:
+        cmd = 'insert_table';
+        break;
+      case MarkdownToolbarAction.search:
+        break;
+    }
+
+    if (cmd == null) return;
+    await _previewWebViewController.focusEditor();
+    await _previewWebViewController.execCmd(cmd, args: args);
+  }
+
+  void _applyToolbarAction(MarkdownToolbarAction action) {
+    if (_mode == EditorMode.edit) {
+      // 工具栏自己处理
+    } else {
+      _handlePreviewToolbarAction(action);
+    }
+  }
+
+  void _showMoreMenu() {
+    final l10n = AppLocalizations.of(context)!;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Theme.of(
+                  context,
+                ).colorScheme.outline.withValues(alpha: 0.3),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 20),
+            ListTile(
+              leading: const Icon(Icons.search),
+              title: Text(l10n.search),
+              onTap: () {
+                Navigator.pop(context);
+                _showInlineSearch();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.keyboard),
+              title: const Text('快捷键帮助'),
+              subtitle: const Text('查看所有可用快捷键'),
+              onTap: () {
+                Navigator.pop(context);
+                showShortcutsHelpDialog(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.picture_as_pdf),
+              title: Text(l10n.exportAsPdf),
+              onTap: () async {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(SnackBar(content: Text(l10n.generatingPdf)));
+                try {
+                  await ExportService.exportAndShareAsPdf(
+                    _textController.text,
+                    widget.filePath
+                        .split(Platform.pathSeparator)
+                        .last
+                        .replaceAll('.md', ''),
+                  );
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('PDF 导出失败: $e'),
+                        backgroundColor: Theme.of(context).colorScheme.error,
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  }
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.history),
+              title: const Text('查看历史'),
+              subtitle: const Text('查看版本历史与对比'),
+              onTap: () {
+                Navigator.pop(context);
+                _showVersionHistory();
+              },
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+}
