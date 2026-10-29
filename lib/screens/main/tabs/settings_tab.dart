@@ -16,6 +16,7 @@ import '../../settings/appearance_categories_screen.dart';
 import '../../settings/editor_settings_screen.dart';
 import '../../settings/cloud_sync_screen.dart';
 import '../../settings/storage_settings_screen.dart';
+import '../../settings/version_history_screen.dart';
 import '../../settings/about_screen.dart';
 
 class SettingsTab extends StatelessWidget {
@@ -86,6 +87,19 @@ class SettingsTab extends StatelessWidget {
                     context,
                     MaterialPageRoute(
                       builder: (_) => const StorageSettingsScreen(),
+                    ),
+                  ),
+                ),
+
+                _buildSettingsItem(
+                  context,
+                  l10n: l10n,
+                  icon: Icons.history,
+                  title: l10n.versionHistory,
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const VersionHistoryScreen(),
                     ),
                   ),
                 ),

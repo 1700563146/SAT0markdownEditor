@@ -686,6 +686,72 @@ class AppLocalizationsZh extends AppLocalizations {
   String get storageSettings => '存储设置';
 
   @override
+  String get versionHistory => '版本历史';
+
+  @override
+  String get versionHistoryTitle => '版本历史管理';
+
+  @override
+  String get versionRetentionCount => '保留数量';
+
+  @override
+  String get versionRetentionCountDesc => '每个文档保留的最新快照数量';
+
+  @override
+  String get versionCapacityLimit => '容量上限';
+
+  @override
+  String get versionCapacityLimitDesc => '版本快照总占用上限（MB），0 表示不限制';
+
+  @override
+  String get versionCapacityUnlimited => '不限制';
+
+  @override
+  String get versionSnapshotsList => '单文档快照列表';
+
+  @override
+  String get versionSnapshot => '快照';
+
+  @override
+  String versionSnapshotCount(int count) => '$count 个快照';
+
+  @override
+  String versionSnapshotTotalSize(String size) => '共 $size 快照总占用';
+
+  @override
+  String get versionClearDocument => '清理该文档全部快照';
+
+  @override
+  String get versionClearDocumentConfirm => '确定要清理该文档的全部快照吗？此操作不可恢复。';
+
+  @override
+  String get versionClearAll => '一键清理';
+
+  @override
+  String get versionClearAllDesc => '一键清理全部版本快照';
+
+  @override
+  String get versionClearAllConfirm => '确定要清理全部版本快照吗？此操作不可恢复，且不影响原始文档。';
+
+  @override
+  String get versionNoSnapshots => '暂无版本快照';
+
+  @override
+  String get versionScanning => '扫描版本快照…';
+
+  @override
+  String get versionCleaned => '清理完成';
+
+  @override
+  String versionCleanedResult(int count, String size) => '已清理 $count 个文档的快照，释放 $size';
+
+  @override
+  String get versionCapacityPruned => '已按容量上限清理超量快照';
+
+  @override
+  String get versionStorageUsed => '占用';
+
+  @override
   String get storagePermissionTitle => '「所有文件访问」权限';
 
   @override

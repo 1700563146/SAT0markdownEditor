@@ -856,9 +856,15 @@ class _EditorScreenState extends State<EditorScreen>
 
   /// 创建版本快照（后台执行，失败不影响保存状态）
   void _createVersionSnapshot() {
+    // T-13：保留数量 N 从设置读取，实时生效
+    final maxVersions = context.read<SettingsProvider>().maxVersionsPerFile;
     unawaited(
       _snapshotService
-          .createVersion(widget.filePath, _textController.text)
+          .createVersion(
+            widget.filePath,
+            _textController.text,
+            maxVersions: maxVersions,
+          )
           .then((version) {
             appDebugLog('[Version] 版本快照创建成功: v${version.versionNumber}');
           })
@@ -1114,9 +1120,11 @@ class _EditorScreenState extends State<EditorScreen>
 
     try {
       // 调用 SnapshotService 执行回退（内部经 VersionService 自动创建备份）
+      final maxVersions = context.read<SettingsProvider>().maxVersionsPerFile;
       final restoredVersion = await _snapshotService.restoreVersion(
         widget.filePath,
         version.versionNumber,
+        maxVersions: maxVersions,
       );
 
       // 读取恢复后的内容并更新编辑器

@@ -6,6 +6,7 @@
 // - [EditorSettingsProvider]：编辑器（字号、行高、自动保存、工作区）
 // - [SyncSettingsProvider]：云同步（WebDAV / FTP / 自动同步）
 // - [UpdateSettingsProvider]：更新（自动检查 / 通道 / 代理）
+// - [VersionSettingsProvider]：版本历史（T-13 保留数量 / 容量上限）
 //
 // 本类保持原有 `SettingsProvider` 类名与全部公共成员（getter / setter /
 // 静态色板 / initialize），通过组合子 Provider 转发实现，对调用方透明：
@@ -21,6 +22,7 @@ import 'appearance_settings_provider.dart';
 import 'editor_settings_provider.dart';
 import 'sync_settings_provider.dart';
 import 'update_settings_provider.dart';
+import 'version_settings_provider.dart';
 
 /// 设置状态提供者（门面）
 ///
@@ -39,6 +41,9 @@ class SettingsProvider extends ChangeNotifier {
 
   /// 更新领域设置（自动检查 / 通道 / 代理）
   final UpdateSettingsProvider update = UpdateSettingsProvider();
+
+  /// 版本历史设置（T-13：保留数量 / 容量上限）
+  final VersionSettingsProvider versions = VersionSettingsProvider();
 
   // ==================== 预设色板（静态转发） ====================
 
@@ -71,6 +76,7 @@ class SettingsProvider extends ChangeNotifier {
     await editor.initialize();
     await sync.initialize();
     await update.initialize();
+    await versions.initialize();
     notifyListeners();
   }
 
@@ -572,4 +578,22 @@ class SettingsProvider extends ChangeNotifier {
     );
     notifyListeners();
   }
+
+  // ==================== 版本历史设置（T-13） ====================
+
+  /// 单文档保留快照数 N
+  int get maxVersionsPerFile => versions.maxVersionsPerFile;
+
+  /// 版本容量上限（MB），0 表示不限制
+  int get maxTotalSizeMb => versions.maxTotalSizeMb;
+
+  /// 是否启用了版本容量上限
+  bool get versionCapacityLimitEnabled => versions.capacityLimitEnabled;
+
+  /// 设置单文档保留快照数
+  Future<void> setMaxVersionsPerFile(int n) =>
+      versions.setMaxVersionsPerFile(n);
+
+  /// 设置版本容量上限（MB，0 表示不限制）
+  Future<void> setMaxTotalSizeMb(int mb) => versions.setMaxTotalSizeMb(mb);
 }

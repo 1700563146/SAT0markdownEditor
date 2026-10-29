@@ -137,3 +137,32 @@ class DocumentVersion {
         'note: ${note.isEmpty ? "(empty)" : note})';
   }
 }
+
+/// 版本目录汇总（T-13 版本历史管理页用）
+///
+/// 描述工作区中某一个 `.versions/{文档名}/` 目录的快照统计，
+/// 用于版本历史管理页展示单文档快照列表与一键清理。
+class VersionDirSummary {
+  /// `.versions/{文档名}/` 目录的绝对路径
+  final String versionsDir;
+
+  /// 文档名（不含扩展名，取自版本目录名）
+  final String docBaseName;
+
+  /// 该文档的快照数量（不含 metadata.json）
+  final int snapshotCount;
+
+  /// 该文档快照总占用字节数
+  final int totalSizeBytes;
+
+  /// 最近一次快照的修改时间
+  final DateTime lastModified;
+
+  const VersionDirSummary({
+    required this.versionsDir,
+    required this.docBaseName,
+    required this.snapshotCount,
+    required this.totalSizeBytes,
+    required this.lastModified,
+  });
+}

@@ -14,12 +14,21 @@ class SnapshotService {
   final VersionService _versionService;
 
   /// 创建版本快照（内容与最新快照一致时自动去重）
+  ///
+  /// [maxVersions] T-13 保留数量设置；由调用方（编辑器）从
+  /// SettingsProvider.versions 读取后传入。
   Future<DocumentVersion> createVersion(
     String filePath,
     String content, {
     String note = '',
+    int? maxVersions,
   }) {
-    return _versionService.createVersion(filePath, content, note: note);
+    return _versionService.createVersion(
+      filePath,
+      content,
+      note: note,
+      maxVersions: maxVersions,
+    );
   }
 
   /// 获取版本历史（按时间倒序）
@@ -44,9 +53,14 @@ class SnapshotService {
   /// 回退到指定版本（内部自动备份当前内容）
   Future<DocumentVersion> restoreVersion(
     String filePath,
-    int versionNumber,
-  ) {
-    return _versionService.restoreVersion(filePath, versionNumber);
+    int versionNumber, {
+    int? maxVersions,
+  }) {
+    return _versionService.restoreVersion(
+      filePath,
+      versionNumber,
+      maxVersions: maxVersions,
+    );
   }
 
   /// 从指定版本创建新文档，返回新文档路径
