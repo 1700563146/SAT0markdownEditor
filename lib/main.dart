@@ -19,6 +19,7 @@
 // @version 1.3.0
 // ============================================================================
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -71,15 +72,40 @@ void main() async {
   }
 
   // 初始化"我的文件"工作区（创建 Ushio-MD 目录）
+  // 加 3s 超时与失败兜底：磁盘慢/异常时不再无限卡死启动；
+  // 失败后"我的文件"标签页打开时会自行重试（my_files_tab._initWorkspace）。
   final myFilesService = MyFilesService();
-  await myFilesService.initWorkspace();
+  try {
+    await myFilesService.initWorkspace().timeout(const Duration(seconds: 3));
+  } catch (e) {
+    debugPrint('main: 工作区初始化超时或失败，进入应用后重试: $e');
+  }
 
-  // 加载已安装的自定义字体（包括远程下载的内置字体）
-  await FontService.loadAllCustomFonts();
-
+  // LiquidGlass 必须在 runApp 前就绪：runApp 的 wrap() 依赖其初始化产物
   await LiquidGlassWidgets.initialize();
 
-  // 用平台真实版本号覆盖硬编码默认值，避免更新检查/关于页的版本漂移
+  // 自定义字体与真实版本号不再阻塞首帧：延后到首帧渲染完成后加载。
+  // 字体注册完成后的任何 rebuild 会自动换用新字体；版本号在更新检查/关于页
+  // 读取时早已是真实值（加载在启动后数毫秒内完成）。
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    unawaited(_loadDeferredStartupAssets());
+  });
+
+  runApp(
+    LiquidGlassWidgets.wrap(
+      brightnessResolver: Theme.maybeBrightnessOf,
+      child: const MyApp(),
+    ),
+  );
+}
+
+/// 首帧后加载的启动资产：自定义字体 + 平台真实版本号
+Future<void> _loadDeferredStartupAssets() async {
+  try {
+    await FontService.loadAllCustomFonts();
+  } catch (e) {
+    debugPrint('main: 自定义字体加载失败（使用系统字体）: $e');
+  }
   try {
     final packageInfo = await PackageInfo.fromPlatform();
     if (packageInfo.version.isNotEmpty) {
@@ -88,13 +114,6 @@ void main() async {
   } catch (_) {
     // 读取失败时保留 constants.dart 中的兜底默认值
   }
-
-  runApp(
-    LiquidGlassWidgets.wrap(
-      brightnessResolver: Theme.maybeBrightnessOf,
-      child: const MyApp(),
-    ),
-  );
 }
 
 /// ============================================================================

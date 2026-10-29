@@ -64,7 +64,7 @@
 
 ## P1 — 性能
 
-### T-05 启动路径主 isolate 串行阻塞 `未开始`
+### T-05 启动路径主 isolate 串行阻塞 `已完成（2026-10，待构建验证）`
 
 - 问题：`runApp` 前串行 await 工作区初始化、自定义字体、LiquidGlass、PackageInfo。
 - 证据：`lib/main.dart#L75-L84`（await 链）、`#L92`（runApp）。
@@ -152,3 +152,4 @@
 | T-02 | 已完成 | 见 `git log`（feat: 云同步台账三方比较与并发传输） | 新增 `lib/services/sync_ledger.dart`（SHA-256 内容哈希 + 远程 mtime 容差 2s 的三方比较，绑定工作区，工作区变更自动重置）；syncAll 重构为「比较→并发上传(4)→刷新远程列表→并发下载→台账落盘」；单文件失败指数退避重试 3 次，失败不写台账=天然续传；previewSync 未变更文件不再因 mtime 漂移误报冲突；UI 增加失败计数提示。**待** SDK 环境构建验证 + 真机 WebDAV 实测（首次同步逐文件初始化台账，无批量重传） |
 | T-03 | 已完成 | 见 `git log`（feat: 应用内更新完整性/签名校验与 https 代理白名单） | ① CI 生成 checksums.txt 并随 release 发布；② 更新检查拉取 checksums.txt，下载后 SHA-256 校验，不匹配拒绝安装并删除文件；③ MainActivity.installApk 增加包身份/签名一致性/防降级三重校验，拒绝原因回传 UI 展示；④ 代理前缀与目标 URL 仅允许 https；⑤ 新增 test/build_proxy_url_test.dart 覆盖白名单。**待** SDK 环境构建验证 + 真机实测（正常更新 / 篡改 APK / 配置 http 代理被忽略 / 降级包被拒绝） |
 | T-04 | 已完成 | 见 `git log`（feat: WebView CSP 与 bridge 消息白名单） | 实施决策：**以 CSP 替代 DOMPurify**——Vite 产物为外链脚本无内联代码，`script-src 'self'` 即可阻断注入脚本的执行（含 innerHTML 注入的内联事件处理器），内容渲染本就走 ProseMirror schema 白名单，无需额外引入 DOMPurify 依赖。三项落地：① 删除死代码 sanitizeMarkdown 及其全部正则（可被绕过且从未被调用），保留在用的 sanitizeUrl（L1268 图片 src）；② `web/milkdown/index.html` 与 `assets/milkdown_web/index.html`（构建产物）同步注入 CSP meta；③ JS→Flutter bridge 增加 19 种消息类型白名单（与 main.js emit 全集核对），未知类型拒绝转发并记录。**待** SDK 环境构建 + 真机验证编辑器功能正常（若 CSP 误伤按注释放宽对应指令） |
+| T-05 | 已完成 | 见 `git log`（perf: 启动路径延后非必需初始化） | main() 串行 await 链拆解：① 工作区初始化保留在 runApp 前但加 3s 超时 + catch 兜底（my_files_tab 进入时会自行重试，兜底安全）；② LiquidGlass.initialize 保留（runApp 的 wrap 依赖其产物）；③ 自定义字体与 PackageInfo 移入 addPostFrameCallback 首帧后加载，字体注册后任何 rebuild 自动生效，版本号在更新检查/关于页读取时已为真实值。首帧前等待项从 4 项减至 2 项。**待** `flutter run --profile` 对比首帧时间；验证自定义字体用户首屏短暂回退系统字体后恢复 |
