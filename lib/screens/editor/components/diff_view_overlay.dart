@@ -152,30 +152,13 @@ class _DiffViewOverlayState extends State<DiffViewOverlay>
 
   // ==================== Diff 计算 ====================
 
-  /// diff 计算的行数阈值，超过此阈值可能影响性能
-  static const int _diffLineThreshold = 1000;
-
   Future<void> _computeDiff() async {
     try {
       // 使用 Future.delayed 让 UI 先渲染 loading 状态
       await Future<void>.delayed(Duration.zero);
       if (!mounted) return;
 
-      // 检查文档大小，超过阈值时提示用户
-      final oldLineCount = widget.oldContent.split('\n').length;
-      final newLineCount = widget.newContent.split('\n').length;
-      if (oldLineCount > _diffLineThreshold ||
-          newLineCount > _diffLineThreshold) {
-        if (mounted) {
-          setState(() {
-            _errorMessage =
-                '文档较大（${oldLineCount > newLineCount ? oldLineCount : newLineCount} 行），差异计算可能较慢';
-          });
-        }
-        // 延迟一下再计算，让用户看到提示
-        await Future<void>.delayed(const Duration(milliseconds: 100));
-      }
-
+      // 超阈值时 calculateLineDiff 内部会降级为统计摘要模式
       final result = calculateLineDiff(widget.oldContent, widget.newContent);
 
       if (mounted) {
@@ -509,7 +492,14 @@ class _DiffViewOverlayState extends State<DiffViewOverlay>
     if (_errorMessage != null) {
       return _buildErrorState(context);
     }
-    if (_diffResult == null || _diffResult!.lines.isEmpty) {
+    if (_diffResult == null) {
+      return _buildEmptyState(context);
+    }
+    // T-08: 超阈值时仅展示统计摘要，不做行级对齐
+    if (_diffResult!.isSummary) {
+      return _buildSummaryState(context);
+    }
+    if (_diffResult!.lines.isEmpty) {
       return _buildEmptyState(context);
     }
     return _buildSideBySideView(context);
