@@ -24,7 +24,6 @@ import 'editor/components/editor_search_bar.dart';
 import 'editor/components/animated_fab.dart';
 import 'editor/components/shortcuts_help_dialog.dart';
 import 'editor/models/editor_models.dart';
-import 'editor/models/editor_patterns.dart';
 import 'editor/models/markdown_parser.dart';
 import 'editor/editor_shortcuts.dart';
 import '../utils/app_style.dart';
@@ -33,15 +32,16 @@ import '../utils/debug_log.dart';
 import '../utils/markdown_incremental_merge.dart';
 import '../utils/responsive_layout.dart';
 import '../services/cloud_sync_service.dart';
-import '../services/file_service.dart';
 import '../services/webdav_service.dart';
 import '../services/ftp_service.dart';
 import '../services/my_files_service.dart';
 import '../services/sync_service_interface.dart';
-import '../services/version_service.dart';
 import '../models/document_version.dart';
 import 'editor/components/version_history_sheet.dart';
 import 'editor/components/diff_view_overlay.dart';
+import 'editor/autosave_service.dart';
+import 'editor/editor_session_controller.dart';
+import 'editor/snapshot_service.dart';
 
 enum EditorMode { edit, preview }
 
@@ -81,12 +81,9 @@ class _EditorScreenState extends State<EditorScreen>
   /// T-06：Web 侧「最后一次成功回写」的完整 markdown 基线。行级增量 patch
   /// 基于该基线逐次应用（与 Web 侧 lastSentMarkdown 严格同步）；full 回写时
   /// 直接重置。基线缺失或 patch 越界时视为不同步，请求 Web 侧全量对齐。
-  String? _lastWebMarkdown;
+  /// T-09：该基线已下沉至 [EditorSessionController.lastWebMarkdown]。
 
   // ==================== 字数统计缓存 ====================
-  int _cachedCharCount = 0;
-  int _cachedGlyphCount = 0;
-  int _cachedWordCount = 0;
   Timer? _wordCountDebounce;
 
   late TextEditingController _textController;
@@ -129,10 +126,6 @@ class _EditorScreenState extends State<EditorScreen>
   /// 就不能再跟随 _textController 每次按键重发全文，故进入编辑态时冻结一份。
   String _webViewMarkdownInEdit = '';
   bool _isLoading = true;
-  bool _isModified = false;
-  bool _isSaving = false;
-  bool _isAutoSaving = false;
-  DateTime? _lastSaveTime;
   Timer? _blurFallbackTimer;
   bool _isMilkdownEditorFocused = false;
   bool _showToc = false;
@@ -143,7 +136,6 @@ class _EditorScreenState extends State<EditorScreen>
   bool _previewCanRedo = false;
   bool _hidePlatformViews = false;
   bool _isAppInBackground = false;
-  Timer? _autoSaveTimer;
   int? _highlightedLine;
   List<SearchMatch> _searchMatches = const [];
   int _activeSearchMatchIndex = -1;
@@ -152,8 +144,6 @@ class _EditorScreenState extends State<EditorScreen>
   final _searchHistoryService = SearchHistoryService();
 
   // Original Markdown for incremental merge (preserves original formatting)
-  String _originalMarkdown = '';
-  String _originalLineEnding = '\n';
   bool _isMilkdownReady = false;
   static const bool _enableIncrementalMerge = true;
 
@@ -170,7 +160,6 @@ class _EditorScreenState extends State<EditorScreen>
   int? _currentTocIndex;
 
   // ==================== 版本历史 ====================
-  final _versionService = VersionService();
   final _versionHistoryController = VersionHistoryController();
   bool _showVersionHistoryOverlay = false;
   List<DocumentVersion> _versions = [];
@@ -178,6 +167,11 @@ class _EditorScreenState extends State<EditorScreen>
   String? _versionErrorMessage;
   OverlayEntry? _diffOverlayEntry;
   bool _isRestoringVersion = false;
+
+  // ==================== T-09 拆分服务 ====================
+  late final EditorSessionController _sessionController;
+  late final AutosaveService _autosaveService;
+  late final SnapshotService _snapshotService;
 
   static const _jumpTopOffset = 32.0;
 
@@ -275,6 +269,14 @@ class _EditorScreenState extends State<EditorScreen>
       settings.setLastOpenedFilePath(widget.filePath);
     });
 
+    // T-09：初始化拆分后的文档生命周期 / 自动保存 / 版本快照服务
+    _sessionController = EditorSessionController(
+      filePath: widget.filePath,
+      fileServiceProvider: () => context.read<FileProvider>().fileService,
+    );
+    _autosaveService = AutosaveService();
+    _snapshotService = SnapshotService();
+
     _textController = TextEditingController();
     _searchController = TextEditingController();
     _editScrollController = ScrollController();
@@ -332,10 +334,9 @@ class _EditorScreenState extends State<EditorScreen>
     });
 
     try {
-      final fileService = context.read<FileProvider>().fileService;
       appDebugLog('[EDITOR] Reading file: ${widget.filePath}');
       final loadStopwatch = Stopwatch()..start();
-      final content = await fileService.readFile(widget.filePath);
+      final content = await _sessionController.loadContent();
       loadStopwatch.stop();
       appDebugLog(
         '[EDITOR] File read in ${loadStopwatch.elapsedMilliseconds}ms, length: ${content.length}',
@@ -360,27 +361,13 @@ class _EditorScreenState extends State<EditorScreen>
       '[EDITOR] _applyLoadedContent called, length: ${content.length}',
     );
     _textController.text = content;
-    // Store original markdown for incremental merge
-    _originalMarkdown = content;
-    // T-06：新文档加载后 Web 侧基线未建立，置空等待首个 full 回写重建，
-    // 防止残留上一文档的增量基线导致 patch 错位。
-    _lastWebMarkdown = null;
-    _originalLineEnding = content.contains('\r\n') ? '\r\n' : '\n';
+    // T-09：文档基线 / 修改状态 / 字数缓存下沉到 EditorSessionController
+    _sessionController.applyLoadedContent(content);
     _isMilkdownReady = false;
     if (!_textListenerAttached) {
       _textController.addListener(_onTextChanged);
       _textListenerAttached = true;
     }
-    // 初始化字数统计缓存
-    _cachedCharCount = content.length;
-    _cachedGlyphCount = content.runes.where((char) {
-      final value = String.fromCharCode(char);
-      return value.trim().isNotEmpty;
-    }).length;
-    _cachedWordCount = content
-        .split(wordSplitRegex)
-        .where((w) => w.isNotEmpty)
-        .length;
     _recordHistorySnapshot(
       text: content,
       selection: const TextSelection.collapsed(offset: 0),
@@ -389,14 +376,13 @@ class _EditorScreenState extends State<EditorScreen>
   }
 
   void _configureAutoSave() {
-    _autoSaveTimer?.cancel();
     final settings = context.read<SettingsProvider>();
-    if (settings.autoSave) {
-      _autoSaveTimer = Timer.periodic(
-        Duration(seconds: settings.autoSaveInterval),
-        (_) => _autoSave(),
-      );
-    }
+    // T-09：定时保存调度下沉到 AutosaveService
+    _autosaveService.configure(
+      enabled: settings.autoSave,
+      interval: Duration(seconds: settings.autoSaveInterval),
+      onTick: _autoSave,
+    );
   }
 
   void _attachEditSelectionListener() {
@@ -524,8 +510,8 @@ class _EditorScreenState extends State<EditorScreen>
   }
 
   void _onTextChanged() {
-    if (!_isModified) {
-      setState(() => _isModified = true);
+    if (!_sessionController.isModified) {
+      setState(() => _sessionController.isModified = true);
     }
     if (!_isApplyingHistory) {
       _recordHistorySnapshot();
@@ -541,16 +527,8 @@ class _EditorScreenState extends State<EditorScreen>
   }
 
   void _updateWordCount() {
-    final text = _textController.text;
-    _cachedCharCount = text.length;
-    _cachedGlyphCount = text.runes.where((char) {
-      final value = String.fromCharCode(char);
-      return value.trim().isNotEmpty;
-    }).length;
-    _cachedWordCount = text
-        .split(wordSplitRegex)
-        .where((w) => w.isNotEmpty)
-        .length;
+    // T-09：字数统计下沉到 EditorSessionController
+    _sessionController.updateWordCount(_textController.text);
     if (mounted) setState(() {});
   }
 
@@ -714,20 +692,17 @@ class _EditorScreenState extends State<EditorScreen>
   Future<void> _autoSave() async {
     // 如果正在回退版本，跳过自动保存
     if (_isRestoringVersion) return;
-    if (_isModified && !_isSaving) {
-      setState(() => _isAutoSaving = true);
+    if (_sessionController.isModified && !_sessionController.isSaving) {
+      setState(() => _sessionController.isAutoSaving = true);
       await _saveFile(showSnackbar: false, isAutoSave: true);
       if (mounted) {
-        setState(() => _isAutoSaving = false);
+        setState(() => _sessionController.isAutoSaving = false);
       }
     }
   }
 
   String _normalizeLineEndings(String text) {
-    return FileService.normalizeLineEndings(
-      text,
-      lineEnding: _originalLineEnding,
-    );
+    return _sessionController.normalizeLineEndings(text);
   }
 
   Future<void> _saveFile({
@@ -735,33 +710,24 @@ class _EditorScreenState extends State<EditorScreen>
     bool isAutoSave = false,
   }) async {
     final l10n = AppLocalizations.of(context)!;
-    if (_isSaving) return;
+    if (_sessionController.isSaving) return;
 
     // 没有任何编辑就不碰文件：打开再保存必须逐字节保持原样。
     // 一旦写盘，换行归一化和增量合并的回波都可能改写用户的文件。
-    if (!_isModified && _pendingMilkdownMarkdown == null) {
+    if (!_sessionController.isModified && _pendingMilkdownMarkdown == null) {
       return;
     }
 
     // 保存前先应用尚未执行的增量合并，避免保存到过期内容。
     _flushPendingMilkdownMerge();
 
-    setState(() => _isSaving = true);
+    setState(() => _sessionController.isSaving = true);
 
     try {
-      final fileService = context.read<FileProvider>().fileService;
-      await fileService.saveFile(
-        widget.filePath,
-        _normalizeLineEndings(_textController.text),
-      );
+      // T-09：写盘 / 基线更新 / 修改状态下沉到 EditorSessionController
+      await _sessionController.saveContent(_textController.text);
       if (mounted) {
-        // Update original markdown after successful save
-        // This resets the baseline for future incremental merges
-        _originalMarkdown = _textController.text;
-        setState(() {
-          _isModified = false;
-          _lastSaveTime = DateTime.now();
-        });
+        setState(() {});
       }
 
       // 创建版本快照（失败不影响保存成功状态）
@@ -822,7 +788,7 @@ class _EditorScreenState extends State<EditorScreen>
     }
 
     if (mounted) {
-      setState(() => _isSaving = false);
+      setState(() => _sessionController.isSaving = false);
     }
   }
 
@@ -891,7 +857,7 @@ class _EditorScreenState extends State<EditorScreen>
   /// 创建版本快照（后台执行，失败不影响保存状态）
   void _createVersionSnapshot() {
     unawaited(
-      _versionService
+      _snapshotService
           .createVersion(widget.filePath, _textController.text)
           .then((version) {
             appDebugLog('[Version] 版本快照创建成功: v${version.versionNumber}');
@@ -911,7 +877,7 @@ class _EditorScreenState extends State<EditorScreen>
     });
 
     try {
-      final versions = await _versionService.getVersionHistory(widget.filePath);
+      final versions = await _snapshotService.getVersionHistory(widget.filePath);
       if (mounted) {
         setState(() {
           _versions = versions;
@@ -938,13 +904,13 @@ class _EditorScreenState extends State<EditorScreen>
 
   /// 更新版本备注
   Future<void> _updateVersionNote(DocumentVersion version, String note) async {
-    await _versionService.updateVersionNote(
+    await _snapshotService.updateVersionNote(
       widget.filePath,
       version.versionNumber,
       note,
     );
     // 刷新版本列表
-    final versions = await _versionService.getVersionHistory(widget.filePath);
+    final versions = await _snapshotService.getVersionHistory(widget.filePath);
     if (mounted) {
       setState(() {
         _versions = versions;
@@ -954,11 +920,11 @@ class _EditorScreenState extends State<EditorScreen>
 
   /// 显示未保存修改的 Diff 对比视图
   ///
-  /// 对比 _originalMarkdown（上次保存的内容）与 _textController.text（当前内容）
+  /// 对比 originalMarkdown（上次保存的内容）与 _textController.text（当前内容）
   Future<void> _showUnsavedChangesDiff() async {
     try {
       // 获取最新版本信息用于显示
-      final versions = await _versionService.getVersionHistory(widget.filePath);
+      final versions = await _snapshotService.getVersionHistory(widget.filePath);
       final latestVersion = versions.isNotEmpty ? versions.first : null;
 
       if (!mounted) return;
@@ -980,7 +946,7 @@ class _EditorScreenState extends State<EditorScreen>
         context: context,
         oldVersion: latestVersion ?? currentEditingVersion,
         newVersion: currentEditingVersion,
-        oldContent: _originalMarkdown,
+        oldContent: _sessionController.originalMarkdown,
         newContent: _textController.text,
         // 未保存修改视图中，回退按钮变为"丢弃修改"
         onRestore: (_) => _discardUnsavedChanges(),
@@ -1022,12 +988,12 @@ class _EditorScreenState extends State<EditorScreen>
 
     // 恢复到上次保存的内容
     _textController.removeListener(_onTextChanged);
-    _textController.text = _originalMarkdown;
+    _textController.text = _sessionController.originalMarkdown;
     _textController.addListener(_onTextChanged);
     _recordHistorySnapshot(reset: true);
 
     setState(() {
-      _isModified = false;
+      _sessionController.isModified = false;
     });
 
     // 关闭 diff 视图
@@ -1065,12 +1031,12 @@ class _EditorScreenState extends State<EditorScreen>
       }
 
       // 获取 vk-1 的内容（旧版本）
-      final oldVersionContent = await _versionService.getVersionContent(
+      final oldVersionContent = await _snapshotService.getVersionContent(
         widget.filePath,
         version.versionNumber - 1,
       );
       // 获取 vk 的内容（新版本）
-      final newVersionContent = await _versionService.getVersionContent(
+      final newVersionContent = await _snapshotService.getVersionContent(
         widget.filePath,
         version.versionNumber,
       );
@@ -1078,7 +1044,7 @@ class _EditorScreenState extends State<EditorScreen>
       if (!mounted) return;
 
       // 获取 vk-1 的版本信息
-      final versions = await _versionService.getVersionHistory(widget.filePath);
+      final versions = await _snapshotService.getVersionHistory(widget.filePath);
       final oldVersion = versions.firstWhere(
         (v) => v.versionNumber == version.versionNumber - 1,
         orElse: () => version, // fallback，不应该发生
@@ -1143,18 +1109,18 @@ class _EditorScreenState extends State<EditorScreen>
     }
 
     // 暂停自动保存，避免文件冲突
-    _autoSaveTimer?.cancel();
+    _autosaveService.stop();
     _isRestoringVersion = true;
 
     try {
-      // 调用 VersionService 执行回退（内部会自动创建备份）
-      final restoredVersion = await _versionService.restoreVersion(
+      // 调用 SnapshotService 执行回退（内部经 VersionService 自动创建备份）
+      final restoredVersion = await _snapshotService.restoreVersion(
         widget.filePath,
         version.versionNumber,
       );
 
       // 读取恢复后的内容并更新编辑器
-      final restoredContent = await _versionService.getVersionContent(
+      final restoredContent = await _snapshotService.getVersionContent(
         widget.filePath,
         version.versionNumber,
       );
@@ -1164,18 +1130,17 @@ class _EditorScreenState extends State<EditorScreen>
       // 更新编辑器内容和增量合并基准
       _textController.removeListener(_onTextChanged);
       _textController.text = restoredContent;
-      _originalMarkdown = restoredContent;
-      // T-06：恢复版本后 Web 侧会经 didUpdateWidget 重发 init_doc 并重置自身
-      // 基线，此处同步置空本地基线，等待后续 full 回写重建，避免旧基线错配。
-      _lastWebMarkdown = null;
+      // T-09：恢复版本后同步更新 controller 基线（含 T-06 Web 基线置空）
+      _sessionController.originalMarkdown = restoredContent;
+      _sessionController.lastWebMarkdown = null;
       _textController.addListener(_onTextChanged);
 
       // 重置编辑历史
       _recordHistorySnapshot(reset: true);
 
       setState(() {
-        _isModified = false;
-        _lastSaveTime = DateTime.now();
+        _sessionController.isModified = false;
+        _sessionController.lastSaveTime = DateTime.now();
       });
 
       // 关闭所有覆盖层
@@ -1242,7 +1207,7 @@ class _EditorScreenState extends State<EditorScreen>
   /// 从版本创建新文档
   Future<void> _createNewDocFromVersion(DocumentVersion version) async {
     try {
-      final newFilePath = await _versionService.createNewDocFromVersion(
+      final newFilePath = await _snapshotService.createNewDocFromVersion(
         widget.filePath,
         version.versionNumber,
       );
@@ -1270,7 +1235,9 @@ class _EditorScreenState extends State<EditorScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _mergeDebouncer.dispose();
-    _autoSaveTimer?.cancel();
+    // T-09：释放拆分服务资源
+    _autosaveService.dispose();
+    _sessionController.dispose();
     _editScrollTimer?.cancel();
     _searchDebounceTimer?.cancel();
     _actionFeedbackTimer?.cancel();
@@ -1353,7 +1320,7 @@ class _EditorScreenState extends State<EditorScreen>
     if (_editingBlockIndex != null) {
       _finishInlineEdit();
     }
-    if (!_isModified) return true;
+    if (!_sessionController.isModified) return true;
 
     // 检查是否启用了退出时自动保存
     final settings = context.read<SettingsProvider>();
@@ -1743,7 +1710,7 @@ class _EditorScreenState extends State<EditorScreen>
       _textController.removeListener(_onTextChanged);
       _textController.text = newText;
       _textController.addListener(_onTextChanged);
-      setState(() => _isModified = true);
+      setState(() => _sessionController.isModified = true);
       appDebugLog('[CHECKBOX] Checkbox toggled successfully');
     } else {
       appDebugLog(
@@ -2061,20 +2028,20 @@ class _EditorScreenState extends State<EditorScreen>
     if (!_isMilkdownReady) return;
     // T-06：full 回写即最新基线；patch 回写由 _handleMilkdownContentPatch 在
     // 应用成功后推进同一基线。
-    _lastWebMarkdown = markdown;
+    _sessionController.lastWebMarkdown = markdown;
     _pendingMilkdownMarkdown = markdown;
     final seq = ++_milkdownChangeSeq;
     _mergeDebouncer.run(() => _applyMilkdownContentChange(markdown, seq));
   }
 
-  /// T-06：处理 Web 侧行级增量回写。patch 基于本地基线（_lastWebMarkdown）
+  /// T-06：处理 Web 侧行级增量回写。patch 基于本地基线（lastWebMarkdown）
   /// 逐次应用，成功后与 full 路径共用同一防抖/增量合并逻辑，避免长文连续
   /// 输入时每次防抖都全量序列化传输。
   void _handleMilkdownContentPatch(MarkdownChangePayload payload) {
     if (!_isMilkdownReady) return;
     final patch = payload.patch;
     if (patch == null) return;
-    final base = _lastWebMarkdown;
+    final base = _sessionController.lastWebMarkdown;
     if (base == null) {
       // 基线缺失（异常路径）：请求 Web 侧全量对齐，避免增量错位。
       unawaited(_previewWebViewController.execCmd('force_flush_full'));
@@ -2086,7 +2053,7 @@ class _EditorScreenState extends State<EditorScreen>
       unawaited(_previewWebViewController.execCmd('force_flush_full'));
       return;
     }
-    _lastWebMarkdown = updated;
+    _sessionController.lastWebMarkdown = updated;
     _handleMilkdownContentChange(updated);
   }
 
@@ -2106,9 +2073,10 @@ class _EditorScreenState extends State<EditorScreen>
 
     // Apply incremental merge to preserve original formatting
     String finalMarkdown = markdown;
-    if (_enableIncrementalMerge && _originalMarkdown.isNotEmpty) {
+    if (_enableIncrementalMerge &&
+        _sessionController.originalMarkdown.isNotEmpty) {
       final result = incrementalMerge(
-        original: _originalMarkdown,
+        original: _sessionController.originalMarkdown,
         newContent: markdown,
       );
       finalMarkdown = result.content;
@@ -2355,7 +2323,7 @@ class _EditorScreenState extends State<EditorScreen>
         Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 
     return PopScope(
-      canPop: !_isModified && !hasActiveEditingSurface,
+      canPop: !_sessionController.isModified && !hasActiveEditingSurface,
       onPopInvokedWithResult: (didPop, result) async {
         if (didPop) {
           _schedulePlatformViewTeardown();
@@ -2431,7 +2399,7 @@ class _EditorScreenState extends State<EditorScreen>
                             controller: _versionHistoryController,
                             isLoading: _isLoadingVersions,
                             errorMessage: _versionErrorMessage,
-                            isModified: _isModified,
+                            isModified: _sessionController.isModified,
                             onUnsavedChangesSelected: _showUnsavedChangesDiff,
                           ),
                       ],
@@ -2631,16 +2599,16 @@ class _EditorScreenState extends State<EditorScreen>
                   fileName: fileName,
                   fullFilePath: widget.filePath,
                   wordCount: _getWordCount(),
-                  isModified: _isModified,
-                  isSaving: _isSaving,
-                  isAutoSaving: _isAutoSaving,
-                  lastSaveTime: _lastSaveTime,
+                  isModified: _sessionController.isModified,
+                  isSaving: _sessionController.isSaving,
+                  isAutoSaving: _sessionController.isAutoSaving,
+                  lastSaveTime: _sessionController.lastSaveTime,
                   canUndo: _historyIndex > 0,
                   canRedo:
                       _historyIndex >= 0 &&
                       _historyIndex < _editHistory.length - 1,
                   onBack: () async {
-                    if (_isModified) {
+                    if (_sessionController.isModified) {
                       final shouldPop = await _onWillPop();
                       if (shouldPop && mounted) {
                         Navigator.of(context).pop();
@@ -2687,9 +2655,9 @@ class _EditorScreenState extends State<EditorScreen>
   String _getWordCount() {
     final l10n = AppLocalizations.of(context)!;
     return l10n.wordCount(
-      _cachedCharCount,
-      _cachedGlyphCount,
-      _cachedWordCount,
+      _sessionController.cachedCharCount,
+      _sessionController.cachedGlyphCount,
+      _sessionController.cachedWordCount,
     );
   }
 
