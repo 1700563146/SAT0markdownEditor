@@ -765,6 +765,28 @@
   },
   "searchFiles": "Search files...",
   "@searchFiles": { "description": "Search files hint" },
+  "globalSearch": "Global Search",
+  "@globalSearch": { "description": "Global search title" },
+  "globalSearchHint": "Search Markdown content across workspace...",
+  "@globalSearchHint": { "description": "Global search input hint" },
+  "searchingWorkspace": "Searching workspace...",
+  "@searchingWorkspace": { "description": "Global search in progress" },
+  "searchCancelled": "Search cancelled",
+  "@searchCancelled": { "description": "Global search cancelled message" },
+  "workspaceSearchSummary": "{files} files · {matches} matches",
+  "@workspaceSearchSummary": {
+    "description": "Global search result summary",
+    "placeholders": {
+      "files": {
+        "type": "int"
+      },
+      "matches": {
+        "type": "int"
+      }
+    }
+  },
+  "noGlobalSearchResults": "No matching content found",
+  "@noGlobalSearchResults": { "description": "Global search no results message" },
   "sortBy": "Sort by",
   "@sortBy": { "description": "Sort menu title" },
   "customSort": "Custom Sort",

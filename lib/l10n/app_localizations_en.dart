@@ -964,6 +964,25 @@ class AppLocalizationsEn extends AppLocalizations {
   String get searchFiles => 'Search files...';
 
   @override
+  String get globalSearch => 'Global Search';
+
+  @override
+  String get globalSearchHint => 'Search Markdown content across workspace...';
+
+  @override
+  String get searchingWorkspace => 'Searching workspace...';
+
+  @override
+  String get searchCancelled => 'Search cancelled';
+
+  @override
+  String workspaceSearchSummary(int files, int matches) =>
+      '$files files · $matches matches';
+
+  @override
+  String get noGlobalSearchResults => 'No matching content found';
+
+  @override
   String get sortBy => 'Sort by';
 
   @override

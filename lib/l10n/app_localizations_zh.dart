@@ -934,6 +934,25 @@ class AppLocalizationsZh extends AppLocalizations {
   String get searchFiles => '搜索文件...';
 
   @override
+  String get globalSearch => '全局搜索';
+
+  @override
+  String get globalSearchHint => '搜索整个工作区 Markdown 内容...';
+
+  @override
+  String get searchingWorkspace => '正在搜索工作区...';
+
+  @override
+  String get searchCancelled => '搜索已取消';
+
+  @override
+  String workspaceSearchSummary(int files, int matches) =>
+      '$files 个文件 · $matches 处匹配';
+
+  @override
+  String get noGlobalSearchResults => '没有找到匹配内容';
+
+  @override
   String get sortBy => '排序方式';
 
   @override

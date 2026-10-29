@@ -1129,6 +1129,28 @@
   },
   "searchFiles": "搜索文件...",
   "@searchFiles": { "description": "搜索文件提示" },
+  "globalSearch": "全局搜索",
+  "@globalSearch": { "description": "全局搜索标题" },
+  "globalSearchHint": "搜索整个工作区 Markdown 内容...",
+  "@globalSearchHint": { "description": "全局搜索输入提示" },
+  "searchingWorkspace": "正在搜索工作区...",
+  "@searchingWorkspace": { "description": "全局搜索进行中提示" },
+  "searchCancelled": "搜索已取消",
+  "@searchCancelled": { "description": "全局搜索取消提示" },
+  "workspaceSearchSummary": "{files} 个文件 · {matches} 处匹配",
+  "@workspaceSearchSummary": {
+    "description": "全局搜索结果统计",
+    "placeholders": {
+      "files": {
+        "type": "int"
+      },
+      "matches": {
+        "type": "int"
+      }
+    }
+  },
+  "noGlobalSearchResults": "没有找到匹配内容",
+  "@noGlobalSearchResults": { "description": "全局搜索无结果消息" },
   "sortBy": "排序方式",
   "@sortBy": { "description": "排序菜单标题" },
   "customSort": "自定义排序",

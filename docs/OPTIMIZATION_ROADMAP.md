@@ -1,3 +1,14 @@
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: bd18877955418ac982ba109369444e03_ec9f9b41d38d11f1a97752540064ee0f
+    ReservedCode1: mVbETB5PezFHmW9ZmR8XTqBhB2FBDlds4atH3w1QsVmiwehT4t0eTYDqZ3MkPZOa86vemmqnLWtfjbYtEkrQlKl0FtRlkkIw4eJWksMnGjNuJv957rV9PsS5XkNHA1sont91F2ly+uNxYCEcXxNKJ+qiwAm6wVG204U+2yHbXq3E2A2r8itPx8yZc+I=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: bd18877955418ac982ba109369444e03_ec9f9b41d38d11f1a97752540064ee0f
+    ReservedCode2: mVbETB5PezFHmW9ZmR8XTqBhB2FBDlds4atH3w1QsVmiwehT4t0eTYDqZ3MkPZOa86vemmqnLWtfjbYtEkrQlKl0FtRlkkIw4eJWksMnGjNuJv957rV9PsS5XkNHA1sont91F2ly+uNxYCEcXxNKJ+qiwAm6wVG204U+2yHbXq3E2A2r8itPx8yZc+I=
+---
+
 # ushio-md 优化路线图（OPTIMIZATION ROADMAP）
 
 > 基线版本：v1.6.9+4105（仓库初始化提交）
@@ -117,8 +128,10 @@
 - 改法：Milkdown 侧引入 `@milkdown/plugin-diagram`（mermaid）与 footnote 插件；预览与导出同步启用。
 - 验收：README 级 mermaid 图与 `[^1]` 脚注正确渲染。
 
-### T-12 全局工作区搜索 `未开始`
-- 改法：复用 T-07 索引，后台 isolate 做全文 grep（分块读取），结果按文件分组跳转。
+### T-12 全局工作区搜索 `已完成`
+- 问题：文件页仅支持按文件名过滤（`_filteredFiles`），无法跨全工作区对 Markdown 内容做全文搜索。
+- 证据：`lib/services/workspace_search_service.dart`（新增：会话 + 后台 grep isolate）；`lib/screens/workspace_search_screen.dart`（新增：搜索页，防抖 300ms）；`lib/screens/folder/components/folder_browser_header.dart`（搜索模式新增全局搜索按钮）。
+- 改法：复用 T-07 内存索引（`FileService.getIndexedMarkdownPaths()`）直接取工作区全部 Markdown 路径，避免重复递归扫描；全文 grep 在后台 isolate 执行（`Isolate.spawn` + `openRead().transform(Utf8Decoder)` 分块流式读取，逐块按 `\n` 切行匹配，单文件命中上限 300 提前退出）；结果按文件分组展示，点击命中行/分组经 `EditorNavigationHelper.openEditor` 跳转打开；会话持有 isolate 句柄，可随时 `kill(Isolate.immediate)` 取消。
 - 验收：1 万文件工作区搜索响应 < 1s，可取消。
 
 ### T-13 版本历史管理页 `未开始`
@@ -159,3 +172,5 @@
 | T-09 | 已完成 | 见 `git log`（refactor: 拆分 God class：编辑器三服务与设置领域化（T-09）） | God class 拆分两项落地：① `editor_screen.dart` 3129 行 → 拆出 `lib/screens/editor/editor_session_controller.dart`（114 行：文件加载/保存/换行归一化/修改·保存·自动保存状态/增量合并与 Web 基线/字数缓存，`FileService` 经构造闭包注入不持 BuildContext）、`autosave_service.dart`（50 行：Timer.periodic 定时保存调度，configure/stop/dispose，页面回调执行实际保存）、`snapshot_service.dart`（63 行：封装 T-01 `VersionService` 创建/历史/内容/备注/回退/新建接口，可注入替换实现）；页面 State 删除 `_isModified/_isSaving/_isAutoSaving/_lastSaveTime/_autoSaveTimer/_originalMarkdown/_originalLineEnding/_lastWebMarkdown/_cached*` 等字段，initState 创建三服务、dispose 统一释放，保存/回退/放弃修改/未保存 Diff/增量合并/Web 基线/字数统计/onWillPop/UI 传参全部改读 controller 状态；② `settings_provider.dart` 1487 行 → 门面模式按领域拆为 `appearance_settings_provider.dart`（806 行：主题/颜色/背景/底栏/图标/语言/字体）、`editor_settings_provider.dart`（字号/行高/自动保存/工作区）、`sync_settings_provider.dart`（WebDAV/FTP/自动同步）、`update_settings_provider.dart`（自动检查/通道/代理），门面保留 `SettingsProvider` 类名与全部公共成员转发（静态色板直接引用子类静态常量），对调用方透明。静态核对：旧字段/旧服务引用清零、花括号平衡、四个子 Provider 公共成员门面转发零缺失、import 无悬空（移除 file_service/version_service/editor_patterns，新增三服务 import）。**待** SDK 环境构建验证（`flutter analyze`/`test`/`build apk --debug`）+ 真机回归（自动保存/手动保存/版本历史/未保存 Diff/Web 增量回写/主题切换） |
 | T-10 | 已完成 | 见 `git log`（ci: CI 补质量门禁与正式签名（T-10）） | 三项落地：① `.github/workflows/release.yml` 拆出 `quality-gate` job（`flutter analyze --fatal-infos=false` + `flutter test`，pull_request 与 tag push 均触发）；`build-and-release` 增加 `needs: quality-gate` 且 `if: github.event_name == 'push'` 仅在 tag push 时构建发布——PR 上 analyze/test 任一失败即阻断合并（需在仓库 Branch protection 中将「Quality Gate (analyze & test)」设为 required check）；② release 正式签名：`android/app/build.gradle.kts` 新增 `signingConfigs.release`，从 `android/key.properties`（不入库，android/.gitignore 与根 .gitignore 已忽略 `**/*.keystore`/`**/*.jks`/`**/key.properties`）读取 storeFile/storePassword/keyAlias/keyPassword；本地未配置时回退 debug 签名（仅开发调试，打印 WARNING）；workflow 在构建前用 secrets（`ANDROID_KEYSTORE_BASE64`/`KEYSTORE_PASSWORD`/`KEY_ALIAS`/`KEY_PASSWORD`）解码 keystore 并生成 key.properties，任一 secrets 缺失直接 `exit 1` 失败，杜绝静默发布 debug 签名产物；③ release 产物继续附 `checksums.txt`（T-03 已实现并随 release 上传，本次保持）——正式签名后配合 T-03 应用内完整性/签名校验闭环。**待**：仓库配置 4 个 secrets 与 branch protection 后真实 tag push 验证；SDK 环境跑 `flutter analyze`/`flutter test`/`flutter build apk --release` 验证 gradle kts 语法与正式签名生效 |
 | T-11 | 已完成 | 见 `git log`（feat: Mermaid 与脚注支持（T-11）） | 三项落地：① Milkdown 侧 `web/milkdown/package.json` 引入 `@milkdown/plugin-diagram@7.7.0`（mermaid 10.9.8 随之入依赖并更新 package-lock.json）；`src/main.js` 注册 `diagram` + 自研 `diagramView` nodeView（plugin-diagram 仅提供 schema/解析无内置渲染，用 `mermaid.run` 渲染 SVG，串行渲染防抖 + 空态/错误态 class），`RUNTIME_BUILD_TAG` 更新为 `mermaid-footnote-v2-20261029-2114`；脚注由 Crepe 内置 gfm 预设提供（footnote_reference / footnote_definition 节点，无需额外插件）；② `src/style.css` 追加 `.ushio-diagram` 容器与 mermaid SVG、脚注 sup/dl 样式（含暗色模式）；③ PDF 导出侧 `lib/services/export_service.dart` 同步启用：新增 `_footnoteRefRegex`/`_footnoteDefRegex` 收集脚注定义并输出到文档末尾、段落解析跳过脚注定义行、`_stripInlineMarkdown` 将 `[^label]` 引用转为可读 `[label]`、`_buildCodeBlock` 支持 `isMermaid` 标注导出（PDF 无法离线渲染 SVG，保留源码并加「图（Mermaid 源码）」标注，避免丢图）。已执行 `npm ci && npm run build`（build 31s 通过，mermaid 各 diagram chunk 正常产出），`scripts/sync_milkdown_web.bat` 同步 `dist` 至 `assets/milkdown_web/`（index.html 引用新 bundle `index-BI2aOlea.js`，CSP 保留）。**待** SDK 环境构建验证（`flutter analyze`/`test`/`build apk --debug`）+ 真机实测 README 级 mermaid 图渲染与 `[^1]` 脚注显示 |
+| T-12 | 已完成 | 见 `git log`（feat: 全局工作区全文搜索（T-12）） | 落地：① 新增 `lib/services/workspace_search_service.dart`：`WorkspaceSearchSession` 复用 T-07 内存索引（`FileService.getIndexedMarkdownPaths()`）取工作区全部 Markdown 路径（索引为空时先 `listMarkdownFiles` 回填），全文 grep 在 `Isolate.spawn` 后台 isolate 执行（`openRead().transform(Utf8Decoder)` 分块流式读取、按 `\n` 切行、块边界 carry 续接、大小写不敏感匹配、单文件命中上限 300 提前退出，isolate 回传扁平结构 `[scanned, [[path, [[lineNo, text], ...]], ...]]`）；会话持有 isolate 句柄，`cancel()` 幂等（`kill(Isolate.immediate)` + 以 cancelled 结果收口），新搜索前自动取消旧会话；② 新增 `lib/screens/workspace_search_screen.dart`：防抖 300ms 搜索，进行中显示进度 + 取消按钮，结果按文件分组（命中数降序）展示并高亮命中关键词，点击命中行/分组经 `EditorNavigationHelper.openEditor` 跳转打开；③ `folder_browser_header.dart` 搜索模式新增全局搜索按钮，`folder_browser_screen.dart` 接入打开搜索页；④ l10n 四文件（arb + getter）新增 6 条文案。静态自审通过（括号平衡、l10n 一致性、符号引用、isolate 消息协议自洽；修复 `StreamIterator.moveNext` 异步用法）。**待** SDK 环境构建验证（`flutter analyze`/`test`/`build apk --debug`）+ 真机实测 1 万文件工作区搜索响应 < 1s 与搜索取消即时响应 |
+*（内容由AI生成，仅供参考）*

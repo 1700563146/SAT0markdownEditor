@@ -22,6 +22,9 @@ class FolderBrowserHeader extends StatelessWidget {
   final VoidCallback onImageToggle;
   final VoidCallback onNewItem;
 
+  /// 全局工作区搜索入口（T-12）：搜索框模式下点击进入全文搜索页。
+  final VoidCallback? onGlobalSearch;
+
   const FolderBrowserHeader({
     super.key,
     required this.folderName,
@@ -36,6 +39,7 @@ class FolderBrowserHeader extends StatelessWidget {
     required this.showImages,
     required this.onImageToggle,
     required this.onNewItem,
+    this.onGlobalSearch,
   });
 
   @override
@@ -161,6 +165,13 @@ class FolderBrowserHeader extends StatelessWidget {
               ),
             ),
           ),
+          if (onGlobalSearch != null) ...[
+            const SizedBox(width: 8),
+            GlassHeaderButton(
+              icon: Icons.manage_search,
+              onPressed: onGlobalSearch,
+            ),
+          ],
         ],
       ),
     ),

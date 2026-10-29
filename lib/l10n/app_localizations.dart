@@ -1862,6 +1862,42 @@ abstract class AppLocalizations {
   /// **'搜索文件...'**
   String get searchFiles;
 
+  /// 全局搜索标题
+  ///
+  /// In zh, this message translates to:
+  /// **'全局搜索'**
+  String get globalSearch;
+
+  /// 全局搜索输入提示
+  ///
+  /// In zh, this message translates to:
+  /// **'搜索整个工作区 Markdown 内容...'**
+  String get globalSearchHint;
+
+  /// 全局搜索进行中提示
+  ///
+  /// In zh, this message translates to:
+  /// **'正在搜索工作区...'**
+  String get searchingWorkspace;
+
+  /// 全局搜索取消提示
+  ///
+  /// In zh, this message translates to:
+  /// **'搜索已取消'**
+  String get searchCancelled;
+
+  /// 全局搜索结果统计
+  ///
+  /// In zh, this message translates to:
+  /// **'{files} 个文件 · {matches} 处匹配'**
+  String workspaceSearchSummary(int files, int matches);
+
+  /// 全局搜索无结果消息
+  ///
+  /// In zh, this message translates to:
+  /// **'没有找到匹配内容'**
+  String get noGlobalSearchResults;
+
   /// 排序菜单标题
   ///
   /// In zh, this message translates to:

@@ -75,6 +75,11 @@ class FileService {
   /// 查询内存索引；未命中返回 null。
   static FileStatIndex? getCachedStat(String path) => _scanIndex[path];
 
+  /// 返回当前内存索引中的全部 Markdown 文件路径（T-12 全局搜索复用，
+  /// 避免对同一批文件重复递归扫描）。索引未构建时返回空列表，
+  /// 调用方需先触发一次 [listMarkdownFiles] 扫描回填索引。
+  static List<String> getIndexedMarkdownPaths() => _scanIndex.keys.toList();
+
   /// 获取文件 stat：优先内存索引，未命中则异步 stat 并回填。
   static Future<FileStatIndex> statIndexed(String path) async {
     final cached = _scanIndex[path];

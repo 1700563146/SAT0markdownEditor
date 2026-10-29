@@ -16,6 +16,7 @@ import '../utils/responsive_layout.dart';
 import '../widgets/responsive_page_frame.dart';
 import 'folder/components/folder_browser_header.dart';
 import 'folder/components/file_tile.dart';
+import 'workspace_search_screen.dart';
 
 class FolderBrowserScreen extends StatefulWidget {
   final String folderPath;
@@ -316,6 +317,17 @@ class FolderBrowserScreenState extends State<FolderBrowserScreen> {
     );
   }
 
+  /// 打开全局工作区搜索页（T-12）：从工作区根目录做全文搜索。
+  void _openGlobalSearch() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) =>
+            WorkspaceSearchScreen(rootPath: widget.folderPath),
+      ),
+    );
+  }
+
   void _showCreateFolderDialog() {
     final l10n = AppLocalizations.of(context);
     // 简化的新建文件夹 Dialog，直接在当前目录
@@ -416,6 +428,7 @@ class FolderBrowserScreenState extends State<FolderBrowserScreen> {
               _loadFiles();
             },
             onNewItem: _showNewItemMenu,
+            onGlobalSearch: _openGlobalSearch,
           ),
           Expanded(child: _buildContent()),
         ],
