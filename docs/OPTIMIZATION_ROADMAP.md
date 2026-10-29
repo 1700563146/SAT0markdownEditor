@@ -40,7 +40,7 @@
   4. 同步结果输出结构化报告（成功/跳过/冲突/失败计数）。
 - 验收：为冲突三态（仅本地改/仅云端改/双方改）各写一个集成测试；断网重连后只续传失败项。
 
-### T-03 应用内更新无完整性与签名校验，代理允许 http `未开始`
+### T-03 应用内更新无完整性与签名校验，代理允许 http `已完成（2026-10，待构建验证）`
 
 - 问题：APK 下载后直接交安装器，无 SHA-256、无签名校验、不防降级；下载代理前缀允许 `http://`，存在中间人替换安装包风险。
 - 证据：`lib/services/update_service.dart#L197`（buildProxyUrl）、`#L244-L259`（代理下载→安装）；`android/app/src/main/kotlin/com/mdreader/mdreader/MainActivity.kt#L87-L102`（installApk 无校验）。
@@ -150,3 +150,4 @@
 | 图标重构 | 已完成 | （仓库初始化提交） | aapt2 compile 通过；待真机/模拟器目视确认 |
 | T-01 | 已完成 | 见 `git log`（feat: 版本快照去重与保留策略） | 人工自审通过：去重/回填/保留策略/锁修正/`.versions` 排除（本地扫描+云同步收发双侧）均已实现；**待**有 Flutter SDK 环境执行 `flutter pub get`（新增 crypto 依赖）→ `flutter analyze` → `flutter test` → `flutter build apk --debug`，并按验收标准实测 |
 | T-02 | 已完成 | 见 `git log`（feat: 云同步台账三方比较与并发传输） | 新增 `lib/services/sync_ledger.dart`（SHA-256 内容哈希 + 远程 mtime 容差 2s 的三方比较，绑定工作区，工作区变更自动重置）；syncAll 重构为「比较→并发上传(4)→刷新远程列表→并发下载→台账落盘」；单文件失败指数退避重试 3 次，失败不写台账=天然续传；previewSync 未变更文件不再因 mtime 漂移误报冲突；UI 增加失败计数提示。**待** SDK 环境构建验证 + 真机 WebDAV 实测（首次同步逐文件初始化台账，无批量重传） |
+| T-03 | 已完成 | 见 `git log`（feat: 应用内更新完整性/签名校验与 https 代理白名单） | ① CI 生成 checksums.txt 并随 release 发布；② 更新检查拉取 checksums.txt，下载后 SHA-256 校验，不匹配拒绝安装并删除文件；③ MainActivity.installApk 增加包身份/签名一致性/防降级三重校验，拒绝原因回传 UI 展示；④ 代理前缀与目标 URL 仅允许 https；⑤ 新增 test/build_proxy_url_test.dart 覆盖白名单。**待** SDK 环境构建验证 + 真机实测（正常更新 / 篡改 APK / 配置 http 代理被忽略 / 降级包被拒绝） |

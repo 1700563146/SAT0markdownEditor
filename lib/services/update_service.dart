@@ -8,6 +8,7 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
@@ -17,13 +18,19 @@ import '../utils/debug_log.dart';
 class AppInstaller {
   static const platform = MethodChannel('com.ushiomd/install');
 
+  /// 最近一次安装失败的本地原因（成功时为 null）
+  static String? lastErrorMessage;
+
   Future<bool?> install(String filePath) async {
+    lastErrorMessage = null;
     try {
       final result = await platform.invokeMethod<bool>('installApk', {
         'filePath': filePath,
       });
       return result;
     } catch (e) {
+      // 安装被原生层拒绝时（签名不一致/降级/包不匹配），原因在 e 中
+      lastErrorMessage = e.toString();
       appDebugLog('Install error: $e');
       return false;
     }
@@ -38,12 +45,16 @@ class UpdateInfo {
   final String changelog;
   final bool hasUpdate;
 
+  /// 所选 APK 的 SHA-256 校验值（来自发布产物 checksums.txt；缺失为 null）
+  final String? expectedChecksum;
+
   UpdateInfo({
     required this.latestVersion,
     required this.currentVersion,
     required this.downloadUrl,
     required this.changelog,
     required this.hasUpdate,
+    this.expectedChecksum,
   });
 }
 
@@ -99,6 +110,7 @@ class UpdateService {
 
         // 获取下载链接（查找 APK 文件）
         String downloadUrl = data['html_url'] ?? '';
+        String apkAssetName = '';
         final assets = data['assets'] as List<dynamic>?;
         if (assets != null && assets.isNotEmpty) {
           // 优先查找 arm64 版本
@@ -106,6 +118,7 @@ class UpdateService {
             final name = asset['name'] as String? ?? '';
             if (name.contains('arm64') && name.endsWith('.apk')) {
               downloadUrl = asset['browser_download_url'] ?? downloadUrl;
+              apkAssetName = name;
               break;
             }
           }
@@ -115,8 +128,28 @@ class UpdateService {
               final name = asset['name'] as String? ?? '';
               if (name.endsWith('.apk')) {
                 downloadUrl = asset['browser_download_url'] ?? downloadUrl;
+                apkAssetName = name;
                 break;
               }
+            }
+          }
+        }
+
+        // 拉取发布产物的 SHA-256 清单（checksums.txt），用于安装前完整性校验
+        String? expectedChecksum;
+        if (apkAssetName.isNotEmpty && assets != null) {
+          String? checksumsUrl;
+          for (final asset in assets) {
+            if ((asset['name'] as String? ?? '') == 'checksums.txt') {
+              checksumsUrl = asset['browser_download_url'] as String?;
+              break;
+            }
+          }
+          if (checksumsUrl != null && checksumsUrl.isNotEmpty) {
+            final checksums = await _fetchChecksums(client, checksumsUrl);
+            expectedChecksum = checksums[apkAssetName];
+            if (expectedChecksum == null) {
+              appDebugLog('checksums.txt 中未找到 $apkAssetName 的校验值');
             }
           }
         }
@@ -133,6 +166,7 @@ class UpdateService {
           downloadUrl: downloadUrl,
           changelog: changelog,
           hasUpdate: hasUpdate,
+          expectedChecksum: expectedChecksum,
         );
       } else {
         appDebugLog('检查更新失败: HTTP ${response.statusCode}');
@@ -194,6 +228,7 @@ class UpdateService {
   ///
   /// 约定：代理条目就是 `https://<代理域名>/` 这一段前缀，下载时直接拼接原始链接。
   /// 缺少结尾斜杠会自动补全，否则 `https://p.com` + `https://x/a.apk` 会拼成坏地址。
+  /// 安全约束：代理与目标仅允许 https，防止更新包被明文劫持。
   static String? buildProxyUrl(String prefix, String target) {
     final normalizedPrefix = normalizeProxyPrefix(prefix);
     if (normalizedPrefix == null) return null;
@@ -201,7 +236,7 @@ class UpdateService {
     final trimmedTarget = target.trim();
     final targetUri = Uri.tryParse(trimmedTarget);
     if (targetUri == null ||
-        !(targetUri.isScheme('http') || targetUri.isScheme('https')) ||
+        !targetUri.isScheme('https') ||
         !targetUri.hasAuthority) {
       return null;
     }
@@ -210,14 +245,14 @@ class UpdateService {
   }
 
   /// 校验并归一化代理前缀；非法返回 null
+  ///
+  /// 仅接受 `https://` 前缀（拒绝 http 明文代理，防中间人替换安装包）。
   static String? normalizeProxyPrefix(String rawPrefix) {
     final trimmed = rawPrefix.trim();
     if (trimmed.isEmpty) return null;
 
     final uri = Uri.tryParse(trimmed);
-    if (uri == null ||
-        !(uri.isScheme('http') || uri.isScheme('https')) ||
-        uri.host.isEmpty) {
+    if (uri == null || !uri.isScheme('https') || uri.host.isEmpty) {
       return null;
     }
 
@@ -228,11 +263,13 @@ class UpdateService {
   ///
   /// [url] APK 下载链接
   /// [fileName] 保存的文件名
+  /// [expectedChecksum] APK 的 SHA-256 校验值；提供时校验失败将拒绝安装并删除文件
   /// [proxies] 用户自定义代理前缀列表，按顺序尝试；为空或全部失败时直连 [url]
   /// [onProgress] 进度回调 (0.0 - 1.0)
   static Future<bool> downloadAndInstallUpdate(
     String url,
     String fileName, {
+    String? expectedChecksum,
     Function(double)? onProgress,
     http.Client? client,
     AppInstaller? installer,
@@ -243,7 +280,7 @@ class UpdateService {
     for (final prefix in proxies) {
       final proxyUrl = buildProxyUrl(prefix, url);
       if (proxyUrl == null) {
-        appDebugLog('代理条目非法，已跳过: $prefix');
+        appDebugLog('代理条目非法（仅允许 https），已跳过: $prefix');
         continue;
       }
 
@@ -273,6 +310,20 @@ class UpdateService {
     }
 
     if (apkFile != null && apkFile.existsSync()) {
+      // 完整性校验：SHA-256 不匹配时拒绝安装并删除文件
+      if (expectedChecksum != null && expectedChecksum.isNotEmpty) {
+        final actual = await _sha256OfFile(apkFile);
+        if (actual == null || actual != expectedChecksum.toLowerCase()) {
+          appDebugLog(
+            'APK 校验失败，已拒绝安装: expected=$expectedChecksum actual=$actual',
+          );
+          try {
+            await apkFile.delete();
+          } catch (_) {}
+          return false;
+        }
+      }
+
       // 安装
       appDebugLog('开始安装: ${apkFile.path}');
       final appInstaller = installer ?? AppInstaller();
@@ -281,6 +332,48 @@ class UpdateService {
     }
 
     return false;
+  }
+
+  /// 计算文件 SHA-256，失败返回 null
+  static Future<String?> _sha256OfFile(File file) async {
+    try {
+      final bytes = await file.readAsBytes();
+      return sha256.convert(bytes).toString();
+    } catch (e) {
+      appDebugLog('SHA-256 计算失败: $e');
+      return null;
+    }
+  }
+
+  /// 下载并解析 checksums.txt（文件名 → SHA-256 小写），失败返回空 Map
+  static Future<Map<String, String>> _fetchChecksums(
+    http.Client client,
+    String url,
+  ) async {
+    try {
+      final response = await client
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode != 200) {
+        appDebugLog('获取 checksums.txt 失败: HTTP ${response.statusCode}');
+        return const {};
+      }
+      final result = <String, String>{};
+      for (final line in response.body.split(RegExp(r'\r?\n'))) {
+        final trimmed = line.trim();
+        if (trimmed.isEmpty) continue;
+        // 兼容 sha256sum 输出格式："hash  filename" 或 "hash *filename"
+        final match = RegExp(
+          r'^([0-9a-fA-F]{64})\s+\*?(.+)$',
+        ).firstMatch(trimmed);
+        if (match == null) continue;
+        result[match.group(2)!.trim()] = match.group(1)!.toLowerCase();
+      }
+      return result;
+    } catch (e) {
+      appDebugLog('获取 checksums.txt 异常: $e');
+      return const {};
+    }
   }
 
   /// 获取本地临时文件

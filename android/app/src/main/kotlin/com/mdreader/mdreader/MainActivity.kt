@@ -87,13 +87,47 @@ class MainActivity: FlutterActivity() {
     private fun installApk(filePath: String) {
         val file = File(filePath)
         if (!file.exists()) throw Exception("File not found")
-        
+
+        val pm = context.packageManager
+
+        // 解析待安装 APK 信息（包名 / 版本号 / 签名）
+        @Suppress("DEPRECATION")
+        val archiveInfo = pm.getPackageArchiveInfo(filePath, PackageManager.GET_SIGNATURES)
+        if (archiveInfo == null) {
+            throw Exception("Invalid APK: cannot parse archive info")
+        }
+
+        // 包身份校验：必须是本应用的更新包
+        if (archiveInfo.packageName != packageName_) {
+            throw Exception("Package mismatch: ${archiveInfo.packageName}")
+        }
+
+        // 防降级：新包 versionCode 不得低于当前版本
+        val currentVersionCode = try {
+            @Suppress("DEPRECATION")
+            pm.getPackageInfo(packageName_, 0).versionCode.toLong()
+        } catch (e: Exception) { 0L }
+        if (archiveInfo.versionCode < currentVersionCode) {
+            throw Exception(
+                "Downgrade blocked: new=${archiveInfo.versionCode} current=$currentVersionCode"
+            )
+        }
+
+        // 签名一致性校验：防止被替换成他人签名的安装包
+        @Suppress("DEPRECATION")
+        val currentInfo = pm.getPackageInfo(packageName_, PackageManager.GET_SIGNATURES)
+        val currentSig = currentInfo.signatures?.firstOrNull()?.toCharsString()
+        val archiveSig = archiveInfo.signatures?.firstOrNull()?.toCharsString()
+        if (currentSig == null || archiveSig == null || currentSig != archiveSig) {
+            throw Exception("Signature mismatch")
+        }
+
         val uri = FileProvider.getUriForFile(
             context,
             "${context.packageName}.fileProvider",
             file
         )
-        
+
         val intent = Intent(Intent.ACTION_VIEW)
         intent.setDataAndType(uri, "application/vnd.android.package-archive")
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

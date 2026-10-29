@@ -462,6 +462,7 @@ class _AboutScreenState extends State<AboutScreen> {
       final success = await UpdateService.downloadAndInstallUpdate(
         info.downloadUrl,
         'update_${info.latestVersion}.apk',
+        expectedChecksum: info.expectedChecksum,
         proxies: proxies,
         onProgress: (progress) {
           progressNotifier.value = progress;
@@ -472,9 +473,17 @@ class _AboutScreenState extends State<AboutScreen> {
       Navigator.pop(context); // 关闭进度框
 
       if (!success) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(l10n.downloadFailed)));
+        // 展示原生层拒绝原因（签名不一致/降级/包不匹配/校验失败）
+        final installError = AppInstaller.lastErrorMessage;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              installError != null
+                  ? '${l10n.downloadFailed}: $installError'
+                  : l10n.downloadFailed,
+            ),
+          ),
+        );
         // 失败后尝试跳转浏览器
         _launchUrl(info.downloadUrl);
       }

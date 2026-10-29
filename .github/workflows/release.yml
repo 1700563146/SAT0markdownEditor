@@ -78,6 +78,12 @@ jobs:
           echo "Renamed APKs:"
           ls -la *.apk
 
+      - name: Generate SHA-256 checksums
+        working-directory: build/app/outputs/flutter-apk
+        run: |
+          sha256sum *.apk > checksums.txt
+          cat checksums.txt
+
       - name: Generate changelog
         id: changelog
         run: |
@@ -116,16 +122,22 @@ jobs:
             - `ushio-md-v${{ steps.get_version.outputs.VERSION }}-arm64-v8a.apk` - 适用于 64 位设备（推荐）
             - `ushio-md-v${{ steps.get_version.outputs.VERSION }}-x86_64.apk` - 适用于 x86 模拟器
             
+            ### 🔒 完整性校验
+
+            `checksums.txt` 包含所有 APK 的 SHA-256 校验值；应用内更新会在安装前自动校验文件完整性与签名。
+
             ### 💡 安装提示
-            
+
             1. 下载对应架构的 APK 文件
             2. 允许安装未知来源应用
             3. 安装并授予文件访问权限
-            
+
             ---
-            
+
             [完整更新日志](https://github.com/jiuxina/ushio-md/blob/main/CHANGELOG.md)
-          files: build/app/outputs/flutter-apk/*.apk
+          files: |
+            build/app/outputs/flutter-apk/*.apk
+            build/app/outputs/flutter-apk/checksums.txt
           draft: false
           prerelease: false
           generate_release_notes: false
