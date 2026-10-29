@@ -78,7 +78,7 @@
 - 改法：改为增量 patch（行级 diff 或 ProseMirror 事务序列化）；或对 >100KB 文档提高提交间隔并仅在失焦/保存时全量对齐。
 - 验收：100KB 文档连续输入时 Flutter 侧单次消息 < 4KB（增量模式）。
 
-### T-07 目录扫描主 isolate 递归 + 逐文件 stat `未开始`
+### T-07 目录扫描主 isolate 递归 + 逐文件 stat `已完成（2026-10，待构建验证）`
 
 - 问题：工作区大时扫描卡 UI。
 - 证据：`lib/services/file_service.dart#L296`（recursive list + 逐文件 stat）。
@@ -154,3 +154,4 @@
 | T-04 | 已完成 | 见 `git log`（feat: WebView CSP 与 bridge 消息白名单） | 实施决策：**以 CSP 替代 DOMPurify**——Vite 产物为外链脚本无内联代码，`script-src 'self'` 即可阻断注入脚本的执行（含 innerHTML 注入的内联事件处理器），内容渲染本就走 ProseMirror schema 白名单，无需额外引入 DOMPurify 依赖。三项落地：① 删除死代码 sanitizeMarkdown 及其全部正则（可被绕过且从未被调用），保留在用的 sanitizeUrl（L1268 图片 src）；② `web/milkdown/index.html` 与 `assets/milkdown_web/index.html`（构建产物）同步注入 CSP meta；③ JS→Flutter bridge 增加 19 种消息类型白名单（与 main.js emit 全集核对），未知类型拒绝转发并记录。**待** SDK 环境构建 + 真机验证编辑器功能正常（若 CSP 误伤按注释放宽对应指令） |
 | T-05 | 已完成 | 见 `git log`（perf: 启动路径延后非必需初始化） | main() 串行 await 链拆解：① 工作区初始化保留在 runApp 前但加 3s 超时 + catch 兜底（my_files_tab 进入时会自行重试，兜底安全）；② LiquidGlass.initialize 保留（runApp 的 wrap 依赖其产物）；③ 自定义字体与 PackageInfo 移入 addPostFrameCallback 首帧后加载，字体注册后任何 rebuild 自动生效，版本号在更新检查/关于页读取时已为真实值。首帧前等待项从 4 项减至 2 项。**待** `flutter run --profile` 对比首帧时间；验证自定义字体用户首屏短暂回退系统字体后恢复 |
 | T-06 | 已完成 | 见 `git log`（perf: 编辑变更行级增量回写 Markdown（T-06）） | 大文档（>50KB）改为行级增量 patch 回写：① Web 侧 `web/milkdown/src/main.js` 新增 `lastSentMarkdown` 基线 + `createLinePatch`（公共前缀/后缀 + 中间替换，替换 >128 行或超 4KB 序列化上限自动降级全量）+ `force_flush_full` 兜底命令；防抖按档位提高（>100KB 500ms，<10KB 80ms 维持）；② Flutter 侧 `milkdown_bridge.dart` 新增 `MarkdownLinePatch`/`MarkdownChangePayload` 与 `applyMarkdownLinePatch`（行号越界/基线缺失返回 null）；`milkdown_webview_editor.dart` 新增 `onContentPatch` 回调并同步推进 `_lastSyncedMarkdown`；`editor_screen.dart` 新增 `_lastWebMarkdown` 基线 + `_handleMilkdownContentPatch`，patch 无法应用时请求 Web 全量对齐，加载文档/恢复版本时重置基线；③ 文档切换/恢复版本时两侧基线严格重置。**待** SDK 环境构建验证（`flutter analyze`/`test`/`build apk --debug`）+ 真机实测 100KB 文档连续输入单次消息 < 4KB；`assets/milkdown_web` 构建产物需在 SDK 环境执行 `cd web/milkdown && npm ci && npm run build` 后同步 |
+| T-07 | 已完成 | 见 `git log`（perf: 目录扫描移入独立 isolate 并建内存索引（T-07）） | 目录扫描性能优化三项落地：① `file_service.dart` 的 `listMarkdownFiles` 递归扫描 + 逐文件 stat 整体移入独立 isolate（`compute(_scanMarkdownIsolate, ...)`，显式栈遍历 + `followLinks: false` 防符号链接环，跳过 `.versions`，返回扁平 `[path, mtimeMillis, size]`）；② 新增内存索引 `FileStatIndex`（`_scanIndex`：路径→mtime/size），扫描结果统一回填，`statIndexed`/`getCachedStat` 供目录浏览排序与后续 T-12 全局搜索复用；③ `folder_browser_screen.dart` 目录展开保持非递归 `dir.list()` 增量刷新，排序改读内存索引（消除 `isFileSync`/`lastModifiedSync`/`lengthSync` 同步 stat），文本探测与 stat 补缺全部异步化，`FileTile` 增加 `isMarkdown`/`statIndex` 入参避免构建期同步 I/O，并移除逐 entity debugPrint。**待** SDK 环境构建验证（`flutter analyze`/`test`/`build apk --debug`）+ 真机 1 万文件工作区 DevTools frame chart 确认首页无掉帧 |

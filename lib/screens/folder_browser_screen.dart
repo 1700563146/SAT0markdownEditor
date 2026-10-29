@@ -47,6 +47,14 @@ class FolderBrowserScreenState extends State<FolderBrowserScreen> {
   String? _error;
   FileSortOption _sortOption = FileSortOption.nameAsc;
 
+  /// T-07 内存索引缓存：路径 → {mtime, size}（复用 FileService 索引，
+  /// 目录展开非递归刷新时按需异步补 stat，避免同步 stat 卡 UI）
+  Map<String, FileStatIndex> _metaByPath = {};
+
+  /// 本次加载判定为可打开 Markdown 文档的路径集合（供 FileTile 复用，
+  /// 避免构建时对无扩展名文件做同步探测 I/O）
+  final Set<String> _markdownPaths = {};
+
   /// 刷新文件列表（公开方法，供外部调用）
   void refresh() {
     _loadFiles();
@@ -91,27 +99,50 @@ class FolderBrowserScreenState extends State<FolderBrowserScreen> {
 
       final entities = await dir.list().toList();
       debugPrint('[FolderBrowser] _loadFiles: dir=${widget.folderPath}, entityCount=${entities.length}');
+
+      // 过滤 + 收集 stat 元数据：复用 T-07 内存索引，未命中才异步补 stat
+      final metas = <String, FileStatIndex>{};
+      final filtered = <FileSystemEntity>[];
+      _markdownPaths.clear();
       for (final e in entities) {
-        debugPrint('[FolderBrowser]   entity: type=${e.runtimeType}, isDir=${e is Directory}, isFile=${e is File}, path=${e.path}');
-      }
-      _entities = entities.where((e) {
         final name = e.path.split(Platform.pathSeparator).last;
-        if (name.startsWith('.')) return false; // 隐藏隐藏文件
+        if (name.startsWith('.')) continue; // 隐藏隐藏文件
 
-        final isDir = e is Directory;
-        if (isDir) return true;
+        if (e is Directory) {
+          filtered.add(e);
+          continue;
+        }
 
-        // 文件过滤
-        if (_isTextMarkdownFile(e as File)) return true;
-        if (_showImages && _isImage(name)) return true;
-
-        return false;
-      }).toList();
+        final file = e as File;
+        final lower = name.toLowerCase();
+        if (lower.endsWith('.md') ||
+            lower.endsWith('.markdown') ||
+            lower.endsWith('.txt')) {
+          metas[e.path] = await FileService.statIndexed(e.path);
+          _markdownPaths.add(e.path);
+          filtered.add(e);
+          continue;
+        }
+        if (_showImages && _isImage(name)) {
+          metas[e.path] = await FileService.statIndexed(e.path);
+          filtered.add(e);
+          continue;
+        }
+        if (await _isTextMarkdownFile(file)) {
+          metas[e.path] = await FileService.statIndexed(e.path);
+          _markdownPaths.add(e.path);
+          filtered.add(e);
+        }
+      }
+      _metaByPath = metas;
+      _entities = filtered;
 
       _sortFiles();
     } catch (e) {
       _error = e.toString();
       _entities = [];
+      _metaByPath = {};
+      _markdownPaths.clear();
     }
 
     if (mounted) {
@@ -128,7 +159,7 @@ class FolderBrowserScreenState extends State<FolderBrowserScreen> {
         lower.endsWith('.webp');
   }
 
-  bool _isTextMarkdownFile(File file) {
+  Future<bool> _isTextMarkdownFile(File file) async {
     final name = file.path.split(Platform.pathSeparator).last;
     final lower = name.toLowerCase();
     if (lower.endsWith('.md') ||
@@ -138,12 +169,12 @@ class FolderBrowserScreenState extends State<FolderBrowserScreen> {
     }
     if (name.contains('.')) return false;
     try {
-      final randomAccess = file.openSync();
+      final randomAccess = await file.open();
       try {
-        final bytes = randomAccess.readSync(FileService.binaryProbeBytes);
+        final bytes = await randomAccess.read(FileService.binaryProbeBytes);
         return FileService.looksLikeTextBytes(bytes);
       } finally {
-        randomAccess.closeSync();
+        await randomAccess.close();
       }
     } catch (_) {
       return false;
@@ -175,29 +206,25 @@ class FolderBrowserScreenState extends State<FolderBrowserScreen> {
         case FileSortOption.nameDesc:
           return nameB.toLowerCase().compareTo(nameA.toLowerCase());
         case FileSortOption.dateAsc:
-          return FileSystemEntity.isFileSync(a.path) &&
-                  FileSystemEntity.isFileSync(b.path)
-              ? File(
-                  a.path,
-                ).lastModifiedSync().compareTo(File(b.path).lastModifiedSync())
-              : 0; // Folder date sort might be inaccurate, keeping simple
+          final aMeta = _metaByPath[a.path];
+          final bMeta = _metaByPath[b.path];
+          if (aMeta == null || bMeta == null) return 0;
+          return aMeta.mtime.compareTo(bMeta.mtime);
         case FileSortOption.dateDesc:
-          return FileSystemEntity.isFileSync(a.path) &&
-                  FileSystemEntity.isFileSync(b.path)
-              ? File(
-                  b.path,
-                ).lastModifiedSync().compareTo(File(a.path).lastModifiedSync())
-              : 0;
+          final aMeta = _metaByPath[a.path];
+          final bMeta = _metaByPath[b.path];
+          if (aMeta == null || bMeta == null) return 0;
+          return bMeta.mtime.compareTo(aMeta.mtime);
         case FileSortOption.sizeAsc:
-          return FileSystemEntity.isFileSync(a.path) &&
-                  FileSystemEntity.isFileSync(b.path)
-              ? File(a.path).lengthSync().compareTo(File(b.path).lengthSync())
-              : 0;
+          final aMeta = _metaByPath[a.path];
+          final bMeta = _metaByPath[b.path];
+          if (aMeta == null || bMeta == null) return 0;
+          return aMeta.size.compareTo(bMeta.size);
         case FileSortOption.sizeDesc:
-          return FileSystemEntity.isFileSync(a.path) &&
-                  FileSystemEntity.isFileSync(b.path)
-              ? File(b.path).lengthSync().compareTo(File(a.path).lengthSync())
-              : 0;
+          final aMeta = _metaByPath[a.path];
+          final bMeta = _metaByPath[b.path];
+          if (aMeta == null || bMeta == null) return 0;
+          return bMeta.size.compareTo(aMeta.size);
         default:
           return nameA.toLowerCase().compareTo(nameB.toLowerCase());
       }
@@ -461,6 +488,8 @@ class FolderBrowserScreenState extends State<FolderBrowserScreen> {
                     onRefresh: _loadFiles,
                     isDraggable: false,
                     source: FileSource.myFiles,
+                    isMarkdown: _markdownPaths.contains(entity.path),
+                    statIndex: _metaByPath[entity.path],
                   ),
               ],
             ),
@@ -518,6 +547,8 @@ class FolderBrowserScreenState extends State<FolderBrowserScreen> {
                 isDraggable: true, // 总是显示拖拽手柄
                 index: index, // 传递 index 给 ReorderableDragStartListener
                 source: FileSource.myFiles,
+                isMarkdown: _markdownPaths.contains(entity.path),
+                statIndex: _metaByPath[entity.path],
               ),
             );
           },

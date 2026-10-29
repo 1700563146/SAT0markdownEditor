@@ -14,6 +14,7 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../models/markdown_file.dart';
 import 'version_service.dart';
@@ -59,6 +60,34 @@ class FileService {
 
   static final LinkedHashMap<String, _CachedFileContent> _contentCache =
       LinkedHashMap<String, _CachedFileContent>();
+
+  /// T-07 目录扫描内存索引：路径 → {mtime, size}。
+  ///
+  /// 递归扫描结果统一落索引，目录浏览排序/后续全局搜索（T-12）复用，
+  /// 避免对同一批文件反复 stat。
+  static final Map<String, FileStatIndex> _scanIndex = {};
+
+  /// 更新内存索引。
+  static void _updateScanIndex(String path, DateTime mtime, int size) {
+    _scanIndex[path] = FileStatIndex(mtime, size);
+  }
+
+  /// 查询内存索引；未命中返回 null。
+  static FileStatIndex? getCachedStat(String path) => _scanIndex[path];
+
+  /// 获取文件 stat：优先内存索引，未命中则异步 stat 并回填。
+  static Future<FileStatIndex> statIndexed(String path) async {
+    final cached = _scanIndex[path];
+    if (cached != null) return cached;
+    try {
+      final stat = await File(path).stat();
+      final index = FileStatIndex(stat.modified, stat.size);
+      _scanIndex[path] = index;
+      return index;
+    } catch (_) {
+      return const FileStatIndex(DateTime.fromMillisecondsSinceEpoch(0), 0);
+    }
+  }
 
   /// 判断字节内容是否看起来像文本（无 NUL 且可按 UTF-8 解码）。
   static bool looksLikeTextBytes(List<int> bytes) {
@@ -284,7 +313,10 @@ class FileService {
   ///
   /// [directoryPath] 目录的绝对路径
   ///
-  /// 递归扫描所有子目录，返回按修改时间倒序排列的文件列表
+  /// 递归扫描与逐文件 stat 在独立 isolate 中执行（compute），
+  /// 避免工作区文件多时阻塞主 isolate 卡 UI（T-07）；
+  /// 扫描结果写入内存索引（路径→mtime/size），供目录展开与后续搜索复用。
+  /// 返回按修改时间倒序排列的文件列表
   Future<List<MarkdownFile>> listMarkdownFiles(String directoryPath) async {
     final directory = Directory(directoryPath);
     if (!await directory.exists()) {
@@ -293,29 +325,21 @@ class FileService {
 
     final files = <MarkdownFile>[];
     try {
-      // 递归扫描所有子目录
-      await for (final entity in directory.list(recursive: true)) {
-        if (entity is File) {
-          // 跳过版本快照目录（.versions），避免污染文件列表与搜索
-          if (entity.path
-              .split(RegExp(r'[/\\]'))
-              .contains(VersionService.versionsDirName)) {
-            continue;
-          }
-          final path = entity.path.toLowerCase();
-          // 只处理 Markdown 文件
-          if (path.endsWith('.md') || path.endsWith('.markdown')) {
-            final stat = await entity.stat();
-            files.add(
-              MarkdownFile(
-                path: entity.path,
-                name: entity.path.split(Platform.pathSeparator).last,
-                lastModified: stat.modified,
-                size: stat.size,
-              ),
-            );
-          }
-        }
+      // 递归扫描 + 逐文件 stat 移至独立 isolate
+      final scanned = await compute(_scanMarkdownIsolate, directoryPath);
+      for (final item in scanned) {
+        final path = item[0] as String;
+        final mtime = DateTime.fromMillisecondsSinceEpoch(item[1] as int);
+        final size = item[2] as int;
+        _updateScanIndex(path, mtime, size);
+        files.add(
+          MarkdownFile(
+            path: path,
+            name: path.split(Platform.pathSeparator).last,
+            lastModified: mtime,
+            size: size,
+          ),
+        );
       }
     } catch (e) {
       // 优雅处理权限错误等情况
@@ -776,4 +800,68 @@ class _CachedFileContent {
   bool isExpired({Duration ttl = const Duration(minutes: 5)}) {
     return DateTime.now().difference(cachedAt) > ttl;
   }
+}
+
+/// 文件系统统计索引条目（T-07 内存索引）。
+class FileStatIndex {
+  /// 最后修改时间
+  final DateTime mtime;
+
+  /// 文件大小（字节）
+  final int size;
+
+  const FileStatIndex(this.mtime, this.size);
+}
+
+/// 独立 isolate 中的递归扫描函数（`compute` 目标，T-07）。
+///
+/// - 显式栈替代递归，避免深层目录爆栈；
+/// - `listSync(followLinks: false)` 防止符号链接环导致死循环；
+/// - 跳过 `.versions` 版本快照目录，避免污染文件列表与搜索；
+/// - 返回可跨 isolate 发送的扁平结构：`[path, mtimeMillis, size]`。
+List<List<Object>> _scanMarkdownIsolate(String rootPath) {
+  final results = <List<Object>>[];
+  try {
+    final stack = <String>[rootPath];
+    while (stack.isNotEmpty) {
+      final current = stack.removeLast();
+      late final List<FileSystemEntity> entities;
+      try {
+        entities = Directory(current).listSync(followLinks: false);
+      } catch (_) {
+        continue; // 权限错误等不可读目录，跳过
+      }
+      for (final entity in entities) {
+        final path = entity.path;
+        // 跳过版本快照目录（.versions），避免污染文件列表与搜索
+        if (path
+            .split(RegExp(r'[/\\]'))
+            .contains(VersionService.versionsDirName)) {
+          continue;
+        }
+        if (entity is Directory) {
+          stack.add(path);
+        } else if (entity is File) {
+          final lower = path.toLowerCase();
+          // 只处理 Markdown 文件
+          if (!(lower.endsWith('.md') || lower.endsWith('.markdown'))) {
+            continue;
+          }
+          try {
+            final stat = entity.statSync();
+            results.add([
+              path,
+              stat.modified.millisecondsSinceEpoch,
+              stat.size,
+            ]);
+          } catch (_) {
+            // 单个文件 stat 失败不影响整体扫描
+          }
+        }
+      }
+    }
+  } catch (_) {
+    // 顶层异常（如根目录不可读）时返回已收集结果
+  }
+  return results;
 }

@@ -17,6 +17,13 @@ class FileTile extends StatelessWidget {
   final int? index;
   final FileSource source;
 
+  /// T-07 由列表页预判并传入：是否为可打开的 Markdown 文档，
+  /// 避免构建时对无扩展名文件做同步探测 I/O。
+  final bool? isMarkdown;
+
+  /// T-07 内存索引（路径→mtime/size），命中时不再执行同步 stat。
+  final FileStatIndex? statIndex;
+
   const FileTile({
     super.key,
     required this.entity,
@@ -24,6 +31,8 @@ class FileTile extends StatelessWidget {
     this.isDraggable = false,
     this.index,
     this.source = FileSource.myFiles,
+    this.isMarkdown,
+    this.statIndex,
   });
 
   @override
@@ -34,24 +43,31 @@ class FileTile extends StatelessWidget {
     final isFile = entity is File;
     final name = entity.path.split(Platform.pathSeparator).last;
     final isImage = isFile && _isImage(name);
-    final isMarkdownFile = isFile && _isMarkdownDocument(entity as File);
+    final isMarkdownFile = isFile && (isMarkdown ?? _isMarkdownDocument(entity as File));
     final isPinned = source == FileSource.pinned;
 
-    // 获取文件/文件夹信息 (日期/大小)
+    // 获取文件/文件夹信息 (日期/大小)：优先 T-07 内存索引，未命中才同步 stat
     String subtitle = '';
     try {
-      final stat = entity.statSync();
-      // 对于文件夹，显示路径；对于文件，显示路径或大小
+      final index = statIndex ?? FileService.getCachedStat(entity.path);
       if (isFile) {
-        if (stat.size < 0 ||
-            stat.modified.year < 1971 ||
-            stat.modified.year > 2100) {
-          subtitle = '未知 · 未知';
-        } else {
-          final date = stat.modified;
+        if (index != null) {
+          final date = index.mtime;
           final formattedDate =
               '${date.year}/${date.month}/${date.day} ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
-          subtitle = '${_formatSize(stat.size)} · $formattedDate';
+          subtitle = '${_formatSize(index.size)} · $formattedDate';
+        } else {
+          final stat = entity.statSync();
+          if (stat.size < 0 ||
+              stat.modified.year < 1971 ||
+              stat.modified.year > 2100) {
+            subtitle = '未知 · 未知';
+          } else {
+            final date = stat.modified;
+            final formattedDate =
+                '${date.year}/${date.month}/${date.day} ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
+            subtitle = '${_formatSize(stat.size)} · $formattedDate';
+          }
         }
       } else {
         subtitle = entity.path;
