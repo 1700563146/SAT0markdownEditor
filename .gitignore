@@ -60,6 +60,11 @@ linked_*.ds
 unlinked.ds
 unlinked_spec.ds
 
+# Android signing material —— 密钥与签名配置严禁入库（T-10）
+**/*.keystore
+**/*.jks
+**/key.properties
+
 # Android related
 **/android/**/gradle-wrapper.jar
 .gradle/

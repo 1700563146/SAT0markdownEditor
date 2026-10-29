@@ -4,13 +4,45 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  # T-10：PR 上跑质量门禁（analyze + test），任一失败即阻断合并
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  # T-10：质量门禁 —— analyze/test 任一失败即 job 失败，阻断 PR 合并
+  quality-gate:
+    name: Quality Gate (analyze & test)
     runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Flutter analyze (fatal-infos off)
+        run: flutter analyze --fatal-infos=false
+
+      - name: Flutter test
+        run: flutter test
+
+  build-and-release:
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    # T-10：仅在 tag push 时构建发布（PR 只跑质量门禁）
+    if: github.event_name == 'push'
 
     steps:
       - name: Checkout
@@ -51,6 +83,23 @@ jobs:
 
       - name: Flutter pub get
         run: flutter pub get
+
+      # T-10：正式签名 —— keystore 与密钥全部来自仓库 secrets，不入库；secrets 缺失直接失败，禁止静默发布 debug 签名产物
+      - name: Configure release signing (secrets -> keystore & key.properties)
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::Missing Android signing secrets (ANDROID_KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD). Refusing to build a debug-signed/unsigned release."
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          printf 'storeFile=upload-keystore.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
+          echo "Signing config written (android/app/upload-keystore.jks + android/key.properties)"
 
       - name: Build release APKs (split per ABI)
         run: flutter build apk --release --split-per-abi
