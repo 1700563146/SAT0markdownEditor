@@ -435,7 +435,10 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
   }
 
   Future<void> _applyCapacityLimit(int mb) async {
-    await _versionService.enforceCapacityLimit(_workspacePath, mb);
+    await _versionService.enforceCapacityLimit(
+      _workspacePath,
+      maxTotalSizeMb: mb,
+    );
     await _reloadSummaries();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(

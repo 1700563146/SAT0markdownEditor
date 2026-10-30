@@ -17,7 +17,9 @@
 // ============================================================================
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import '../utils/app_style.dart';
 import 'appearance_settings_provider.dart';
 import 'editor_settings_provider.dart';
 import 'sync_settings_provider.dart';
@@ -72,10 +74,12 @@ class SettingsProvider extends ChangeNotifier {
   Future<void> initialize() async {
     // 子 Provider 按序初始化；appearance 内部包含莫奈配色一次性迁移。
     // 领域间无共享键依赖，顺序仅用于保持日志与副作用的一致性。
-    await appearance.initialize();
-    await editor.initialize();
-    await sync.initialize();
-    await update.initialize();
+    // 四个领域子 Provider 需要 SharedPreferences 实例完成持久化恢复。
+    final prefs = await SharedPreferences.getInstance();
+    await appearance.initialize(prefs);
+    await editor.initialize(prefs);
+    await sync.initialize(prefs);
+    await update.initialize(prefs);
     await versions.initialize();
     notifyListeners();
   }

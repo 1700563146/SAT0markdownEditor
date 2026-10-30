@@ -169,12 +169,12 @@ class _ContentSanitizer {
   );
   
   static final RegExp _dangerousAttributes = RegExp(
-    r'\s(on\w+)\s*=\s*["\'][^"\']*["\']',
+    r'''\s(on\w+)\s*=\s*["'][^"']*["']''',
     caseSensitive: false,
   );
   
   static final RegExp _javascriptProtocol = RegExp(
-    r'(href|src|action)\s*=\s*["\']?\s*javascript:',
+    r'''(href|src|action)\s*=\s*["']?\s*javascript:''',
     caseSensitive: false,
   );
   

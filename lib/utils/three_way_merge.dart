@@ -113,7 +113,7 @@ class MergeAnalysis {
   bool get hasConflicts => conflicts.isNotEmpty;
 
   /// 无冲突时直接合成合并文本；有冲突时冲突块默认采用本地侧（保守）
-  String get autoMergedText => renderMergedText(fragments, const []);
+  String get autoMergedText => renderMergedText(this, const []);
 }
 
 /// 单个变更区间（hunk），行号基于 base 文档（1-based）

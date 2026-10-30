@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mdreader/widgets/sliding_segment_toggle.dart';
 
@@ -27,8 +27,8 @@ class _ToggleHarnessState extends State<_ToggleHarness> {
           setState(() => _index = index);
         },
         items: const [
-          SlidingSegmentItem(icon: Icons.description, label: 'File'),
-          SlidingSegmentItem(icon: Icons.folder, label: 'Folder'),
+          SlidingSegmentItem(icon: Icons.description, semanticLabel: 'File'),
+          SlidingSegmentItem(icon: Icons.folder, semanticLabel: 'Folder'),
         ],
       ),
     );
@@ -123,8 +123,8 @@ void main() {
                 selectedIndex: 0,
                 onChanged: (_) {},
                 items: const [
-                  SlidingSegmentItem(icon: Icons.description, label: 'File'),
-                  SlidingSegmentItem(icon: Icons.folder, label: 'Folder'),
+                  SlidingSegmentItem(icon: Icons.description, semanticLabel: 'File'),
+                  SlidingSegmentItem(icon: Icons.folder, semanticLabel: 'Folder'),
                 ],
               ),
             ],

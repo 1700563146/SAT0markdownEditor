@@ -68,6 +68,24 @@ const Set<String> _knownBridgeMessageTypes = <String>{
 
 /// 内容安全工具类
 class _ContentSanitizer {
+  /// 危险 HTML 标签（脚本 / 内嵌 / 样式注入等）
+  static final RegExp _dangerousTags = RegExp(
+    r'<(script|iframe|object|embed|applet|style|link|meta|base)[\s>]',
+    caseSensitive: false,
+  );
+
+  /// 危险事件处理属性（onerror / onclick 等）
+  static final RegExp _dangerousAttributes = RegExp(
+    r'\s(on[a-z]+)\s*=',
+    caseSensitive: false,
+  );
+
+  /// 危险协议（javascript: / vbscript: / data:text/html）
+  static final RegExp _javascriptProtocol = RegExp(
+    r'^\s*(javascript|vbscript|data:text/html)\s*:',
+    caseSensitive: false,
+  );
+
   /// 清理 URL，阻止危险协议（图片/链接等资源地址白名单）
   static String sanitizeUrl(String url) {
     final trimmed = url.trim();

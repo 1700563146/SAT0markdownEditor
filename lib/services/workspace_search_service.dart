@@ -169,7 +169,7 @@ class WorkspaceSearchSession {
 
     // 若在 spawn 等待期间已被取消，立即终止刚启动的 isolate 并收口。
     if (_cancelled) {
-      isolate.kill(priority: Isolate.immediate);
+      _isolate?.kill(priority: Isolate.immediate);
       return _finish(WorkspaceSearchResult(
         query: query,
         cancelled: true,
@@ -297,7 +297,7 @@ Future<List<List<Object>>> _grepFile(String path, String queryLower) async {
     var hitCap = false;
 
     // 流式分块：逐块解码并按 \n 切行，块边界未完成行携带到下一块。
-    final iterator = stream.iterator;
+    final iterator = StreamIterator(stream);
     while (await iterator.moveNext()) {
       final combined = carry + iterator.current;
       final lines = combined.split('\n');

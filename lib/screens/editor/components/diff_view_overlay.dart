@@ -582,6 +582,37 @@ class _DiffViewOverlayState extends State<DiffViewOverlay>
     );
   }
 
+  Widget _buildSummaryState(BuildContext context) {
+    final theme = Theme.of(context);
+    final d = _diffResult!;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.summarize_outlined,
+            size: 48,
+            color: theme.colorScheme.outline,
+          ),
+          const SizedBox(height: 12),
+          Text(
+            '文档过大，仅显示统计摘要',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.outline,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '+${d.addedCount} / -${d.removedCount} / =${d.unchangedCount}',
+            style: theme.textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildSideBySideView(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;

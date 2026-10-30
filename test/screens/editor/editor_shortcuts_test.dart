@@ -1,10 +1,12 @@
-// ============================================================================
+﻿// ============================================================================
 // 编辑器快捷键测试
 // ============================================================================
 
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ushio_md/screens/editor/editor_shortcuts.dart';
+import 'package:mdreader/screens/editor/editor_shortcuts.dart';
+import 'package:mdreader/widgets/markdown_toolbar.dart';
 
 void main() {
   group('EditorShortcuts', () {

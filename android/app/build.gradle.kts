@@ -18,7 +18,9 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "com.ushiomd"
-    compileSdk = flutter.compileSdkVersion
+    // T-BUILD：receive_sharing_intent 要求 compileSdk 37+；本机 SDK 以 android-37 目录提供该平台
+    // （google 仓库当前无 hash 'android-37'，由 android-37.0 复制而来，见环境备注）。
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -82,15 +84,6 @@ android {
             reset()
             include("armeabi-v7a", "arm64-v8a", "x86_64")
             isUniversalApk = true  // 同时生成通用 APK
-        }
-    }
-
-    // APK 输出命名配置
-    applicationVariants.all {
-        outputs.all {
-            val outputImpl = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
-            val abiName = outputImpl.getFilter(com.android.build.OutputFile.ABI) ?: "universal"
-            outputImpl.outputFileName = "ushio-md-v${versionName}-${abiName}.apk"
         }
     }
 }

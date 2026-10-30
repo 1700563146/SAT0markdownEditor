@@ -686,7 +686,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get confirmMerge => '确认合并';
 
   @override
-  String mergeBlockLabel(int count) => '冲突块 $count';
+  String mergeBlockLabel(int count) {
+    return '冲突块 $count';
+  }
 
   @override
   String get mergeLocalContent => '本地内容';
@@ -698,7 +700,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get mergeKeepBoth => '两者保留';
 
   @override
-  String mergeSelectedBlocks(int total, int decided) => '已选择 $decided/$total 个冲突块';
+  String mergeSelectedBlocks(int total, int decided) {
+    return '已选择 $decided/$total 个冲突块';
+  }
 
   @override
   String get localVersion => '本地';
@@ -711,72 +715,6 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get storageSettings => '存储设置';
-
-  @override
-  String get versionHistory => '版本历史';
-
-  @override
-  String get versionHistoryTitle => '版本历史管理';
-
-  @override
-  String get versionRetentionCount => '保留数量';
-
-  @override
-  String get versionRetentionCountDesc => '每个文档保留的最新快照数量';
-
-  @override
-  String get versionCapacityLimit => '容量上限';
-
-  @override
-  String get versionCapacityLimitDesc => '版本快照总占用上限（MB），0 表示不限制';
-
-  @override
-  String get versionCapacityUnlimited => '不限制';
-
-  @override
-  String get versionSnapshotsList => '单文档快照列表';
-
-  @override
-  String get versionSnapshot => '快照';
-
-  @override
-  String versionSnapshotCount(int count) => '$count 个快照';
-
-  @override
-  String versionSnapshotTotalSize(String size) => '共 $size 快照总占用';
-
-  @override
-  String get versionClearDocument => '清理该文档全部快照';
-
-  @override
-  String get versionClearDocumentConfirm => '确定要清理该文档的全部快照吗？此操作不可恢复。';
-
-  @override
-  String get versionClearAll => '一键清理';
-
-  @override
-  String get versionClearAllDesc => '一键清理全部版本快照';
-
-  @override
-  String get versionClearAllConfirm => '确定要清理全部版本快照吗？此操作不可恢复，且不影响原始文档。';
-
-  @override
-  String get versionNoSnapshots => '暂无版本快照';
-
-  @override
-  String get versionScanning => '扫描版本快照…';
-
-  @override
-  String get versionCleaned => '清理完成';
-
-  @override
-  String versionCleanedResult(int count, String size) => '已清理 $count 个文档的快照，释放 $size';
-
-  @override
-  String get versionCapacityPruned => '已按容量上限清理超量快照';
-
-  @override
-  String get versionStorageUsed => '占用';
 
   @override
   String get storagePermissionTitle => '「所有文件访问」权限';
@@ -1039,8 +977,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get searchCancelled => '搜索已取消';
 
   @override
-  String workspaceSearchSummary(int files, int matches) =>
-      '$files 个文件 · $matches 处匹配';
+  String workspaceSearchSummary(int files, int matches) {
+    return '$files 个文件 · $matches 处匹配';
+  }
 
   @override
   String get noGlobalSearchResults => '没有找到匹配内容';
@@ -1219,5 +1158,72 @@ class AppLocalizationsZh extends AppLocalizations {
   @override
   String fontDownloadFailed(String fontName) {
     return '「$fontName」下载失败，请检查网络';
+  }
+
+  @override
+  String get versionHistory => '版本历史';
+
+  @override
+  String get versionSnapshot => '快照';
+
+  @override
+  String get versionStorageUsed => '占用空间';
+
+  @override
+  String get versionHistoryTitle => '历史设置';
+
+  @override
+  String get versionRetentionCount => '每文件保留版本数';
+
+  @override
+  String get versionRetentionCountDesc => '超出该数量的旧版本将自动清理。';
+
+  @override
+  String get versionCapacityLimit => '容量上限';
+
+  @override
+  String get versionCapacityUnlimited => '不限制';
+
+  @override
+  String get versionCapacityLimitDesc => '快照总大小超过该上限时，自动清理最早的快照。设为 0 表示不限制。';
+
+  @override
+  String get versionSnapshotsList => '快照列表';
+
+  @override
+  String get versionScanning => '正在扫描...';
+
+  @override
+  String get versionNoSnapshots => '暂无快照';
+
+  @override
+  String versionSnapshotCount(int count) {
+    return '$count 个快照';
+  }
+
+  @override
+  String get versionClearAll => '全部清除';
+
+  @override
+  String get versionClearAllDesc => '删除全部版本快照，释放存储空间。';
+
+  @override
+  String get versionCapacityPruned => '容量清理完成';
+
+  @override
+  String get versionClearDocument => '清除文档版本';
+
+  @override
+  String get versionClearDocumentConfirm => '该文档的全部快照将被删除，确定继续吗？';
+
+  @override
+  String get versionCleaned => '版本已清理';
+
+  @override
+  String get versionClearAllConfirm => '所有版本快照将被永久删除，确定继续吗？';
+
+  @override
+  String versionCleanedResult(int docCount, String freed) {
+    return '已清除 $docCount 个文档，释放 $freed。';
   }
 }

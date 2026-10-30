@@ -90,7 +90,7 @@ class FileService {
       _scanIndex[path] = index;
       return index;
     } catch (_) {
-      return const FileStatIndex(DateTime.fromMillisecondsSinceEpoch(0), 0);
+      return FileStatIndex(DateTime.fromMillisecondsSinceEpoch(0), 0);
     }
   }
 

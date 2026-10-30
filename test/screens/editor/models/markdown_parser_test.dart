@@ -1,9 +1,9 @@
-// ============================================================================
+﻿// ============================================================================
 // Markdown 解析器测试
 // ============================================================================
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ushio_md/screens/editor/models/markdown_parser.dart';
+import 'package:mdreader/screens/editor/models/markdown_parser.dart';
 
 void main() {
   group('parseMarkdownBlocks', () {

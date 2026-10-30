@@ -24,6 +24,7 @@ import 'editor/components/editor_search_bar.dart';
 import 'editor/components/animated_fab.dart';
 import 'editor/components/shortcuts_help_dialog.dart';
 import 'editor/models/editor_models.dart';
+import 'editor/models/editor_patterns.dart';
 import 'editor/models/markdown_parser.dart';
 import 'editor/editor_shortcuts.dart';
 import '../utils/app_style.dart';

@@ -1454,129 +1454,6 @@ abstract class AppLocalizations {
   /// **'存储设置'**
   String get storageSettings;
 
-  /// 版本历史管理页面标题
-  ///
-  /// In zh, this message translates to:
-  /// **'版本历史'**
-  String get versionHistory;
-
-  /// 版本历史管理页面副标题
-  ///
-  /// In zh, this message translates to:
-  /// **'版本历史管理'**
-  String get versionHistoryTitle;
-
-  /// 单文档保留快照数量设置项名称
-  ///
-  /// In zh, this message translates to:
-  /// **'保留数量'**
-  String get versionRetentionCount;
-
-  /// 保留数量设置项说明
-  ///
-  /// In zh, this message translates to:
-  /// **'每个文档保留的最新快照数量'**
-  String get versionRetentionCountDesc;
-
-  /// 容量上限设置项名称
-  ///
-  /// In zh, this message translates to:
-  /// **'容量上限'**
-  String get versionCapacityLimit;
-
-  /// 容量上限设置项说明
-  ///
-  /// In zh, this message translates to:
-  /// **'版本快照总占用上限（MB），0 表示不限制'**
-  String get versionCapacityLimitDesc;
-
-  /// 容量上限关闭时显示
-  ///
-  /// In zh, this message translates to:
-  /// **'不限制'**
-  String get versionCapacityUnlimited;
-
-  /// 单文档快照列表区块标题
-  ///
-  /// In zh, this message translates to:
-  /// **'单文档快照列表'**
-  String get versionSnapshotsList;
-
-  /// 单个快照条目显示名
-  ///
-  /// In zh, this message translates to:
-  /// **'快照'**
-  String get versionSnapshot;
-
-  /// 快照数量格式化（含数量）
-  String versionSnapshotCount(int count);
-
-  /// 快照总占用格式化（含大小）
-  String versionSnapshotTotalSize(String size);
-
-  /// 清理单文档快照按钮
-  ///
-  /// In zh, this message translates to:
-  /// **'清理该文档全部快照'**
-  String get versionClearDocument;
-
-  /// 清理单文档快照确认文案
-  ///
-  /// In zh, this message translates to:
-  /// **'确定要清理该文档的全部快照吗？此操作不可恢复。'**
-  String get versionClearDocumentConfirm;
-
-  /// 一键清理按钮
-  ///
-  /// In zh, this message translates to:
-  /// **'一键清理'**
-  String get versionClearAll;
-
-  /// 一键清理说明
-  ///
-  /// In zh, this message translates to:
-  /// **'一键清理全部版本快照'**
-  String get versionClearAllDesc;
-
-  /// 一键清理确认文案
-  ///
-  /// In zh, this message translates to:
-  /// **'确定要清理全部版本快照吗？此操作不可恢复，且不影响原始文档。'**
-  String get versionClearAllConfirm;
-
-  /// 无版本快照时提示
-  ///
-  /// In zh, this message translates to:
-  /// **'暂无版本快照'**
-  String get versionNoSnapshots;
-
-  /// 扫描版本快照中提示
-  ///
-  /// In zh, this message translates to:
-  /// **'扫描版本快照…'**
-  String get versionScanning;
-
-  /// 清理完成提示
-  ///
-  /// In zh, this message translates to:
-  /// **'清理完成'**
-  String get versionCleaned;
-
-  /// 清理结果格式化（含文档数与释放大小）
-  String versionCleanedResult(int count, String size);
-
-  /// 按容量上限清理完成提示
-  ///
-  /// In zh, this message translates to:
-  /// **'已按容量上限清理超量快照'**
-  String get versionCapacityPruned;
-
-  /// 版本快照总占用标签
-  ///
-  /// In zh, this message translates to:
-  /// **'占用'**
-  String get versionStorageUsed;
-
   /// No description provided for @storagePermissionTitle.
   ///
   /// In zh, this message translates to:
@@ -2410,6 +2287,132 @@ abstract class AppLocalizations {
   /// In zh, this message translates to:
   /// **'「{fontName}」下载失败，请检查网络'**
   String fontDownloadFailed(String fontName);
+
+  /// 版本历史入口标题
+  ///
+  /// In zh, this message translates to:
+  /// **'版本历史'**
+  String get versionHistory;
+
+  /// 版本快照数量标签
+  ///
+  /// In zh, this message translates to:
+  /// **'快照'**
+  String get versionSnapshot;
+
+  /// 版本快照占用空间标签
+  ///
+  /// In zh, this message translates to:
+  /// **'占用空间'**
+  String get versionStorageUsed;
+
+  /// 版本历史设置区块标题
+  ///
+  /// In zh, this message translates to:
+  /// **'历史设置'**
+  String get versionHistoryTitle;
+
+  /// 版本保留数量设置标签
+  ///
+  /// In zh, this message translates to:
+  /// **'每文件保留版本数'**
+  String get versionRetentionCount;
+
+  /// 版本保留数量设置说明
+  ///
+  /// In zh, this message translates to:
+  /// **'超出该数量的旧版本将自动清理。'**
+  String get versionRetentionCountDesc;
+
+  /// 版本快照容量上限设置标签
+  ///
+  /// In zh, this message translates to:
+  /// **'容量上限'**
+  String get versionCapacityLimit;
+
+  /// 容量不限制选项
+  ///
+  /// In zh, this message translates to:
+  /// **'不限制'**
+  String get versionCapacityUnlimited;
+
+  /// 版本快照容量上限设置说明
+  ///
+  /// In zh, this message translates to:
+  /// **'快照总大小超过该上限时，自动清理最早的快照。设为 0 表示不限制。'**
+  String get versionCapacityLimitDesc;
+
+  /// 版本快照列表区块标题
+  ///
+  /// In zh, this message translates to:
+  /// **'快照列表'**
+  String get versionSnapshotsList;
+
+  /// 正在扫描版本快照的状态提示
+  ///
+  /// In zh, this message translates to:
+  /// **'正在扫描...'**
+  String get versionScanning;
+
+  /// 快照列表为空提示
+  ///
+  /// In zh, this message translates to:
+  /// **'暂无快照'**
+  String get versionNoSnapshots;
+
+  /// 单个文档的快照数量
+  ///
+  /// In zh, this message translates to:
+  /// **'{count} 个快照'**
+  String versionSnapshotCount(int count);
+
+  /// 清除全部版本快照按钮
+  ///
+  /// In zh, this message translates to:
+  /// **'全部清除'**
+  String get versionClearAll;
+
+  /// 清除全部版本快照说明
+  ///
+  /// In zh, this message translates to:
+  /// **'删除全部版本快照，释放存储空间。'**
+  String get versionClearAllDesc;
+
+  /// 容量上限清理成功提示
+  ///
+  /// In zh, this message translates to:
+  /// **'容量清理完成'**
+  String get versionCapacityPruned;
+
+  /// 清除单个文档版本对话框标题
+  ///
+  /// In zh, this message translates to:
+  /// **'清除文档版本'**
+  String get versionClearDocument;
+
+  /// 清除文档版本确认文案
+  ///
+  /// In zh, this message translates to:
+  /// **'该文档的全部快照将被删除，确定继续吗？'**
+  String get versionClearDocumentConfirm;
+
+  /// 文档版本清理成功提示
+  ///
+  /// In zh, this message translates to:
+  /// **'版本已清理'**
+  String get versionCleaned;
+
+  /// 清除全部版本快照确认文案
+  ///
+  /// In zh, this message translates to:
+  /// **'所有版本快照将被永久删除，确定继续吗？'**
+  String get versionClearAllConfirm;
+
+  /// 清除全部结果提示
+  ///
+  /// In zh, this message translates to:
+  /// **'已清除 {docCount} 个文档，释放 {freed}。'**
+  String versionCleanedResult(int docCount, String freed);
 }
 
 class _AppLocalizationsDelegate

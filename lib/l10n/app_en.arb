@@ -987,5 +987,105 @@
   "paragraphSpacing": "Paragraph Spacing",
   "@paragraphSpacing": {
     "description": "Paragraph spacing setting label"
+  },
+  "versionHistory": "Version History",
+  "@versionHistory": {
+    "description": "Version history section title"
+  },
+  "versionSnapshot": "Snapshots",
+  "@versionSnapshot": {
+    "description": "Version snapshot count label"
+  },
+  "versionStorageUsed": "Storage Used",
+  "@versionStorageUsed": {
+    "description": "Version snapshot storage usage label"
+  },
+  "versionHistoryTitle": "History Settings",
+  "@versionHistoryTitle": {
+    "description": "Version history settings section title"
+  },
+  "versionRetentionCount": "Max Versions per File",
+  "@versionRetentionCount": {
+    "description": "Version retention count setting label"
+  },
+  "versionRetentionCountDesc": "Older versions beyond this count are pruned automatically.",
+  "@versionRetentionCountDesc": {
+    "description": "Version retention count setting description"
+  },
+  "versionCapacityLimit": "Capacity Limit",
+  "@versionCapacityLimit": {
+    "description": "Version snapshot capacity limit setting label"
+  },
+  "versionCapacityUnlimited": "Unlimited",
+  "@versionCapacityUnlimited": {
+    "description": "Unlimited capacity option"
+  },
+  "versionCapacityLimitDesc": "When total snapshot size exceeds this limit, the oldest snapshots are pruned automatically. Set to 0 for unlimited.",
+  "@versionCapacityLimitDesc": {
+    "description": "Version snapshot capacity limit setting description"
+  },
+  "versionSnapshotsList": "Snapshot List",
+  "@versionSnapshotsList": {
+    "description": "Version snapshot list section title"
+  },
+  "versionScanning": "Scanning...",
+  "@versionScanning": {
+    "description": "Scanning version snapshots status"
+  },
+  "versionNoSnapshots": "No snapshots yet",
+  "@versionNoSnapshots": {
+    "description": "Empty snapshot list hint"
+  },
+  "versionSnapshotCount": "{count} snapshots",
+  "@versionSnapshotCount": {
+    "description": "Snapshot count of a document",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "12"
+      }
+    }
+  },
+  "versionClearAll": "Clear All",
+  "@versionClearAll": {
+    "description": "Clear all version snapshots button"
+  },
+  "versionClearAllDesc": "Delete all version snapshots to free up storage space.",
+  "@versionClearAllDesc": {
+    "description": "Clear all version snapshots description"
+  },
+  "versionCapacityPruned": "Capacity pruned successfully",
+  "@versionCapacityPruned": {
+    "description": "Capacity limit pruning success message"
+  },
+  "versionClearDocument": "Clear Document Versions",
+  "@versionClearDocument": {
+    "description": "Clear versions of a single document dialog title"
+  },
+  "versionClearDocumentConfirm": "All snapshots of this document will be deleted. Continue?",
+  "@versionClearDocumentConfirm": {
+    "description": "Clear document versions confirmation message"
+  },
+  "versionCleaned": "Versions cleaned",
+  "@versionCleaned": {
+    "description": "Document versions cleaned success message"
+  },
+  "versionClearAllConfirm": "All version snapshots will be permanently deleted. Continue?",
+  "@versionClearAllConfirm": {
+    "description": "Clear all version snapshots confirmation message"
+  },
+  "versionCleanedResult": "Cleared {docCount} documents, freed {freed}.",
+  "@versionCleanedResult": {
+    "description": "Clear all result message",
+    "placeholders": {
+      "docCount": {
+        "type": "int",
+        "example": "5"
+      },
+      "freed": {
+        "type": "String",
+        "example": "12.4 MB"
+      }
+    }
   }
 }

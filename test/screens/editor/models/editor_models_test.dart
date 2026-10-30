@@ -1,10 +1,10 @@
-// ============================================================================
+﻿// ============================================================================
 // 编辑器模型测试
 // ============================================================================
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ushio_md/screens/editor/models/editor_models.dart';
+import 'package:mdreader/screens/editor/models/editor_models.dart';
 
 void main() {
   group('MarkdownBlock', () {
@@ -66,7 +66,7 @@ void main() {
     });
 
     test('toString returns meaningful representation', () {
-      const entry = EditHistoryEntry(
+      final entry = EditHistoryEntry(
         text: 'A' * 100,
         selection: TextSelection.collapsed(offset: 0),
       );

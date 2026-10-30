@@ -705,7 +705,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get confirmMerge => 'Confirm Merge';
 
   @override
-  String mergeBlockLabel(int count) => 'Conflict block $count';
+  String mergeBlockLabel(int count) {
+    return 'Conflict block $count';
+  }
 
   @override
   String get mergeLocalContent => 'Local content';
@@ -717,8 +719,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get mergeKeepBoth => 'Keep both';
 
   @override
-  String mergeSelectedBlocks(int total, int decided) =>
-      'Selected $decided/$total conflict blocks';
+  String mergeSelectedBlocks(int total, int decided) {
+    return 'Selected $decided/$total conflict blocks';
+  }
 
   @override
   String get localVersion => 'Local';
@@ -731,78 +734,6 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get storageSettings => 'Storage Settings';
-
-  @override
-  String get versionHistory => 'Version History';
-
-  @override
-  String get versionHistoryTitle => 'Version History Manager';
-
-  @override
-  String get versionRetentionCount => 'Retention Count';
-
-  @override
-  String get versionRetentionCountDesc =>
-      'Number of latest snapshots kept per document';
-
-  @override
-  String get versionCapacityLimit => 'Capacity Limit';
-
-  @override
-  String get versionCapacityLimitDesc =>
-      'Total snapshot size limit in MB; 0 means unlimited';
-
-  @override
-  String get versionCapacityUnlimited => 'Unlimited';
-
-  @override
-  String get versionSnapshotsList => 'Snapshots per Document';
-
-  @override
-  String get versionSnapshot => 'Snapshot';
-
-  @override
-  String versionSnapshotCount(int count) => '$count snapshots';
-
-  @override
-  String versionSnapshotTotalSize(String size) => 'Total size: $size';
-
-  @override
-  String get versionClearDocument => 'Clear all snapshots of this document';
-
-  @override
-  String get versionClearDocumentConfirm =>
-      'Clear all snapshots of this document? This cannot be undone.';
-
-  @override
-  String get versionClearAll => 'Clear All';
-
-  @override
-  String get versionClearAllDesc => 'Clear all version snapshots at once';
-
-  @override
-  String get versionClearAllConfirm =>
-      'Clear all version snapshots? This cannot be undone and does not affect original documents.';
-
-  @override
-  String get versionNoSnapshots => 'No version snapshots';
-
-  @override
-  String get versionScanning => 'Scanning version snapshots…';
-
-  @override
-  String get versionCleaned => 'Cleared';
-
-  @override
-  String versionCleanedResult(int count, String size) =>
-      'Cleared snapshots of $count documents, freed $size';
-
-  @override
-  String get versionCapacityPruned =>
-      'Cleared snapshots exceeding the capacity limit';
-
-  @override
-  String get versionStorageUsed => 'Used';
 
   @override
   String get storagePermissionTitle => 'All files access';
@@ -1077,8 +1008,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get searchCancelled => 'Search cancelled';
 
   @override
-  String workspaceSearchSummary(int files, int matches) =>
-      '$files files · $matches matches';
+  String workspaceSearchSummary(int files, int matches) {
+    return '$files files · $matches matches';
+  }
 
   @override
   String get noGlobalSearchResults => 'No matching content found';
@@ -1268,5 +1200,77 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String fontDownloadFailed(String fontName) {
     return 'Failed to download \"$fontName\". Please check your network.';
+  }
+
+  @override
+  String get versionHistory => 'Version History';
+
+  @override
+  String get versionSnapshot => 'Snapshots';
+
+  @override
+  String get versionStorageUsed => 'Storage Used';
+
+  @override
+  String get versionHistoryTitle => 'History Settings';
+
+  @override
+  String get versionRetentionCount => 'Max Versions per File';
+
+  @override
+  String get versionRetentionCountDesc =>
+      'Older versions beyond this count are pruned automatically.';
+
+  @override
+  String get versionCapacityLimit => 'Capacity Limit';
+
+  @override
+  String get versionCapacityUnlimited => 'Unlimited';
+
+  @override
+  String get versionCapacityLimitDesc =>
+      'When total snapshot size exceeds this limit, the oldest snapshots are pruned automatically. Set to 0 for unlimited.';
+
+  @override
+  String get versionSnapshotsList => 'Snapshot List';
+
+  @override
+  String get versionScanning => 'Scanning...';
+
+  @override
+  String get versionNoSnapshots => 'No snapshots yet';
+
+  @override
+  String versionSnapshotCount(int count) {
+    return '$count snapshots';
+  }
+
+  @override
+  String get versionClearAll => 'Clear All';
+
+  @override
+  String get versionClearAllDesc =>
+      'Delete all version snapshots to free up storage space.';
+
+  @override
+  String get versionCapacityPruned => 'Capacity pruned successfully';
+
+  @override
+  String get versionClearDocument => 'Clear Document Versions';
+
+  @override
+  String get versionClearDocumentConfirm =>
+      'All snapshots of this document will be deleted. Continue?';
+
+  @override
+  String get versionCleaned => 'Versions cleaned';
+
+  @override
+  String get versionClearAllConfirm =>
+      'All version snapshots will be permanently deleted. Continue?';
+
+  @override
+  String versionCleanedResult(int docCount, String freed) {
+    return 'Cleared $docCount documents, freed $freed.';
   }
 }
