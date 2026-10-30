@@ -12,7 +12,7 @@ AIGC:
 # SAT0markdownEditor（沢）— 专注写作体验的 Markdown 编辑器
 
 <p align="center">
-  <img src="assets/logo.jpg" width="180" alt="沢 Logo">
+  <img src="app.png" width="180" alt="沢 Logo">
 </p>
 
 <p align="center">
