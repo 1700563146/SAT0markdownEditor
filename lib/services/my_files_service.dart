@@ -13,6 +13,7 @@
 
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../providers/settings_provider.dart';
@@ -154,7 +155,8 @@ class MyFilesService {
 
   /// 初始化工作区
   ///
-  /// 首次启动时调用，确保工作区目录存在
+  /// 首次启动时调用，确保工作区目录存在，并把内置的 Markdown 全语法
+  /// 示例文档复制到工作区根目录（已存在则跳过，避免覆盖用户内容）。
   Future<void> initWorkspace() async {
     final path = await getWorkspacePath();
     final dir = Directory(path);
@@ -162,6 +164,17 @@ class MyFilesService {
     if (!await dir.exists()) {
       await dir.create(recursive: true);
       appDebugLog('MyFilesService: 创建工作区目录 $path');
+    }
+
+    try {
+      final sample = File('$path${Platform.pathSeparator}example_markdown.md');
+      if (!await sample.exists()) {
+        final data = await rootBundle.load('assets/example_markdown.md');
+        await sample.writeAsBytes(data.buffer.asUint8List(), flush: true);
+        appDebugLog('MyFilesService: 已写入示例文档 $path${Platform.pathSeparator}example_markdown.md');
+      }
+    } catch (e) {
+      appDebugLog('MyFilesService: 写入示例文档失败: $e');
     }
   }
 
