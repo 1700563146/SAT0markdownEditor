@@ -4,7 +4,7 @@
 msix_config:
   display_name: 沢
   publisher_display_name: 沢 Markdown Editor
-  identity_name: Ushio.Markdown.Editor
+  identity_name: Taku.Markdown.Editor
   msix_version: 1.5.9.0
   logo_path: app.png
   trim_logo: true

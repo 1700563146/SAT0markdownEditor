@@ -71,7 +71,7 @@ void main() {
 
 ```bash
 # 查看工作区目录
-ls -la Documents/Ushio-md
+ls -la Documents/Taku-md
 ```
 
 无语言标注的代码块：

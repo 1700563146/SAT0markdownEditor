@@ -361,7 +361,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
           controller: _folderNameController,
           decoration: InputDecoration(
             labelText: l10n.cloudFolderName,
-            hintText: 'Ushio-MD',
+            hintText: 'Taku-MD',
             prefixIcon: const Icon(Icons.folder),
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
             helperText: l10n.folderNameHelper,

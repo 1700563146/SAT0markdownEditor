@@ -76,7 +76,7 @@ class AppConstants {
   static const String appAuthor = 'jiuxina';
 
   /// GitHub 仓库地址
-  static const String githubUrl = 'https://github.com/jiuxina/ushio-md';
+  static const String githubUrl = 'https://github.com/1700563146/SAT0markdownEditor';
 
   /// 下载代理输入框的示例格式。
   /// example.com 是 RFC 2606 保留域，永远不可解析，确保示例是假的。
@@ -378,7 +378,7 @@ class AppConstants {
   // ==================== 云同步配置 ====================
 
   /// 默认同步文件夹名称
-  static const String defaultSyncFolderName = 'Ushio-MD';
+  static const String defaultSyncFolderName = 'Taku-MD';
 
   /// 默认 FTP 端口
   static const int defaultFtpPort = 21;

@@ -50,7 +50,7 @@ void main() {
       expect(provider.autoSave, false);
       expect(provider.autoSaveInterval, 30);
       expect(provider.webdavUrl, isEmpty);
-      expect(provider.syncFolderName, 'Ushio-MD');
+      expect(provider.syncFolderName, 'Taku-MD');
       expect(provider.buttonStyleMode, AppButtonStyleMode.liquidGlass);
       expect(provider.customIconColor, isNull);
       expect(provider.customCardColor, isNull);

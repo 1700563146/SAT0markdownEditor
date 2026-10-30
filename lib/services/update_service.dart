@@ -3,7 +3,7 @@
 // ============================================================================
 //
 // 通过 GitHub API 检查应用是否有新版本。
-// 仓库地址：https://github.com/jiuxina/ushio-md
+// 仓库地址：https://github.com/1700563146/SAT0markdownEditor
 // ============================================================================
 
 import 'dart:convert';
@@ -65,11 +65,11 @@ enum UpdateChannel { stable, prerelease }
 class UpdateService {
   /// GitHub 稳定版 API 地址
   static const String _apiUrl =
-      'https://api.github.com/repos/jiuxina/ushio-md/releases/latest';
+      'https://api.github.com/repos/1700563146/SAT0markdownEditor/releases/latest';
 
   /// GitHub 全部发布列表地址
   static const String _allReleasesUrl =
-      'https://api.github.com/repos/jiuxina/ushio-md/releases';
+      'https://api.github.com/repos/1700563146/SAT0markdownEditor/releases';
 
   /// 检查更新
   ///

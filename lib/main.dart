@@ -71,7 +71,7 @@ void main() async {
     });
   }
 
-  // 初始化"我的文件"工作区（创建 Ushio-MD 目录）
+  // 初始化"我的文件"工作区（创建 Taku-MD 目录）
   // 加 3s 超时与失败兜底：磁盘慢/异常时不再无限卡死启动；
   // 失败后"我的文件"标签页打开时会自行重试（my_files_tab._initWorkspace）。
   final myFilesService = MyFilesService();

@@ -82,7 +82,7 @@ void main() {
   }
 
   test('WebDAVService 上传/列表/下载/删除', () async {
-    final service = newService('Ushio-MD-T1');
+    final service = newService('Taku-MD-T1');
     await service.ensureRemoteWorkspace();
 
     final localFile = File(p.join(serverRoot.path, 'note.md'));
@@ -107,7 +107,7 @@ void main() {
   });
 
   test('CloudSyncService 全量同步上传（含嵌套目录）', () async {
-    final service = newService('Ushio-MD-T2');
+    final service = newService('Taku-MD-T2');
     final workspace = Directory(p.join(serverRoot.path, 'workspace_t2'));
     await workspace.create(recursive: true);
     await Directory(p.join(workspace.path, 'sub')).create(recursive: true);
@@ -126,7 +126,7 @@ void main() {
     expect(result.success, isTrue, reason: result.errorMessage);
     expect(result.uploadedCount, 2);
 
-    final remoteRoot = Directory(p.join(serverRoot.path, 'Ushio-MD-T2'));
+    final remoteRoot = Directory(p.join(serverRoot.path, 'Taku-MD-T2'));
     expect(File(p.join(remoteRoot.path, 'local_a.md')).existsSync(), isTrue);
     expect(
       File(p.join(remoteRoot.path, 'sub', 'local_b.md')).existsSync(),
@@ -135,7 +135,7 @@ void main() {
   });
 
   test('CloudSyncService 全量同步下载远端新增文件', () async {
-    final service = newService('Ushio-MD-T3');
+    final service = newService('Taku-MD-T3');
     await service.ensureRemoteWorkspace();
 
     final remoteSeed = File(p.join(serverRoot.path, 'remote_seed.md'));

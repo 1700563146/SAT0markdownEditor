@@ -386,7 +386,7 @@ class FolderBrowserScreenState extends State<FolderBrowserScreen> {
     String displayName;
     if (widget.title != null) {
       displayName = widget.title!;
-    } else if (folderName == 'Ushio-MD' || folderName == 'Ushio-md') {
+    } else if (folderName == 'Taku-MD' || folderName == 'Taku-md') {
       displayName = l10n?.myFiles ?? 'My Files';
     } else {
       displayName = folderName;

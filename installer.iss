@@ -3,10 +3,10 @@
 ; 使用 Inno Setup 编译
 
 #define MyAppName "沢"
-#define MyAppNameEn "Ushio"
+#define MyAppNameEn "Taku"
 #define MyAppVersion "1.5.12"
 #define MyAppPublisher "沢 Markdown Editor"
-#define MyAppURL "https://github.com/jiuxina/ushio-md"
+#define MyAppURL "https://github.com/1700563146/SAT0markdownEditor"
 #define MyAppExeName "沢.exe"
 
 [Setup]

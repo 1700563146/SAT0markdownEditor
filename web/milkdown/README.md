@@ -1,4 +1,4 @@
-# Ushio Milkdown Web Source
+# Taku Milkdown Web Source
 
 此目录用于承载 Milkdown Web 端源码与开发配置。
 

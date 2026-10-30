@@ -54,7 +54,7 @@ class SyncSettingsProvider extends ChangeNotifier
   String _ftpPassword = '';
 
   /// 云端同步文件夹名称
-  String _syncFolderName = 'Ushio-MD';
+  String _syncFolderName = 'Taku-MD';
 
   /// 云端文件夹路径前缀（不含文件夹名称）
   String _syncRemotePath = '/storage/emulated/0/';
@@ -185,7 +185,7 @@ class SyncSettingsProvider extends ChangeNotifier
     }
 
     _ftpUsername = prefs.getString('ftp_username') ?? '';
-    _syncFolderName = prefs.getString('sync_folder_name') ?? 'Ushio-MD';
+    _syncFolderName = prefs.getString('sync_folder_name') ?? 'Taku-MD';
     _syncRemotePath =
         prefs.getString('sync_remote_path') ?? '/storage/emulated/0/';
     _autoSyncEnabled = prefs.getBool('auto_sync_enabled') ?? false;

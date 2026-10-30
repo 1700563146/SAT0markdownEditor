@@ -53,7 +53,7 @@ class EditorSettingsProvider extends ChangeNotifier
   String? _defaultDirectory;
 
   /// 工作区文件夹名称
-  String _workspaceName = 'Ushio-md';
+  String _workspaceName = 'Taku-md';
 
   /// 自定义工作区基础路径（可选，为null时使用平台默认路径）
   String? _customWorkspaceBasePath;
@@ -95,7 +95,7 @@ class EditorSettingsProvider extends ChangeNotifier
       await prefs.remove('tab_bar_style');
     }
     _defaultDirectory = prefs.getString('default_directory');
-    _workspaceName = prefs.getString('workspace_name') ?? 'Ushio-md';
+    _workspaceName = prefs.getString('workspace_name') ?? 'Taku-md';
 
     // 自定义工作区基础路径 - 如果未设置，使用平台默认路径
     final savedCustomPath = prefs.getString('custom_workspace_base_path');

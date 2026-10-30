@@ -2,7 +2,7 @@
 // 我的文件服务
 //
 // 管理 "我的文件" 工作区，包括：
-// - 工作区初始化（创建 Ushio-md 目录）
+// - 工作区初始化（创建 Taku-md 目录）
 // - 文件导入（复制外部文件到工作区）
 // - 路径检查（判断文件是否在工作区内）
 //
@@ -23,7 +23,7 @@ import '../utils/debug_log.dart';
 /// "我的文件" 工作区服务
 class MyFilesService {
   /// 工作区根目录名称（默认值，可被 SettingsProvider 覆盖）
-  static const String defaultWorkspaceName = 'Ushio-md';
+  static const String defaultWorkspaceName = 'Taku-md';
 
   /// SettingsProvider 引用（可选，用于获取自定义工作区名称）
   SettingsProvider? _settingsProvider;
@@ -124,9 +124,9 @@ class MyFilesService {
   /// 获取工作区根路径
   ///
   /// 默认工作区：
-  /// - Windows/macOS/Linux: ~/Documents/Ushio-md
-  /// - Android: /storage/emulated/0/Documents/Ushio-md (公共目录)
-  /// - iOS: App Documents/Ushio-md
+  /// - Windows/macOS/Linux: ~/Documents/Taku-md
+  /// - Android: /storage/emulated/0/Documents/Taku-md (公共目录)
+  /// - iOS: App Documents/Taku-md
   /// 或用户自定义的基础路径下
   Future<String> getWorkspacePath() async {
     if (_workspacePath != null) {

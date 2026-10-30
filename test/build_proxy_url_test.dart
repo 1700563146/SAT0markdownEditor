@@ -39,8 +39,8 @@ void main() {
   });
 
   group('buildProxyUrl', () {
-    const target = 'https://github.com/jiuxina/ushio-md/releases/download/'
-        'v1.6.9/ushio-md-v1.6.9-arm64-v8a.apk';
+    const target = 'https://github.com/1700563146/SAT0markdownEditor/releases/download/'
+        'v1.6.9/taku-md-v1.6.9-arm64-v8a.apk';
 
     test('https 代理 + https 目标正常拼接', () {
       expect(
