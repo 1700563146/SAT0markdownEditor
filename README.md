@@ -1,56 +1,38 @@
-# 汐 - Markdown Editor
+# SAT0markdownEditor（汐）— 专注写作体验的 Markdown 编辑器
 
 <p align="center">
-  <img src="app.png" width="180" alt="汐 Logo">
-</p>
-<p align="center">
-  <b>专注写作体验的 Markdown 编辑器</b><br>
-  渲染即改 · 目录与搜索 · 版本历史 · 本地文件管理 · 同步与导出
+  <img src="assets/logo.jpg" width="180" alt="汐 Logo">
 </p>
 
 <p align="center">
-  <a href="https://github.com/jiuxina/ushio-md/releases">
-    <img src="https://img.shields.io/github/downloads/jiuxina/ushio-md/total?style=social" alt="GitHub Downloads">
-  </a>
-  <a href="https://github.com/jiuxina/ushio-md/stargazers">
-    <img src="https://img.shields.io/github/stars/jiuxina/ushio-md?style=social" alt="GitHub stars">
-  </a>
-  <a href="https://github.com/jiuxina/ushio-md/network/members">
-    <img src="https://img.shields.io/github/forks/jiuxina/ushio-md?style=social" alt="GitHub forks">
-  </a>
-  <a href="https://github.com/jiuxina/ushio-md/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/jiuxina/ushio-md" alt="GitHub license">
-  </a>
-  <a href="https://www.android.com">
-    <img src="https://img.shields.io/badge/platform-Android-brightgreen" alt="Platform Android">
-  </a>
+  <b>渲染即改 · 目录与搜索 · 版本历史 · 本地文件管理 · 同步与导出</b><br>
+  Android / Windows 双平台 Markdown 编辑器，编辑器内核基于 Milkdown（ProseMirror）构建
+</p>
+
+<p align="center">
+  <img src="assets/demo.gif" width="320" alt="功能演示">
 </p>
 
 ## 目录
 
-- [为什么选择汐](#为什么选择汐)
-- [核心功能](#核心功能)
+- [项目简介](#项目简介)
+- [功能特性](#功能特性)
+- [优化成果（T-01 ~ T-14）](#优化成果t-01--t-14)
 - [截图展示](#截图展示)
-- [安装](#安装)
+- [下载与安装](#下载与安装)
+- [构建方式](#构建方式)
 - [快速上手](#快速上手)
 - [权限说明](#权限说明)
 - [Markdown 支持](#markdown-支持)
 - [常见问题](#常见问题)
 - [反馈与支持](#反馈与支持)
-- [版本计划](#版本计划)
 - [开源协议](#开源协议)
-- [赞助支持](#赞助支持)
 
-## 为什么选择汐
+## 项目简介
 
-- 面向写作本身：打开即写，渲染态直接点选内容就能修改，不必在源码与预览之间来回切换。
-- 长文更稳：目录跳转、全文搜索、代码块交互与长文滚动都做过专项优化，编辑器内核在启动时预热并在文档间复用。
-- 改错了能回来：每次保存自动生成快照，版本历史可按行对比差异并回退，也可以另存为新文档。
-- 外观可调范围广：三套 UI 风格、浅色 5 套 / 深色 6 套主题方案、10 个预设强调色，字体、文字颜色、卡片与导航栏透明度均可单独设置。
-- 数据留在自己手里：工作区就是你指定的本地目录，云同步（WebDAV / FTP）与导出（PDF / 长图 / ZIP）都是可选项。
-- 如果可以的话，希望能点个star支持一下呢～
+SAT0markdownEditor（应用名「汐」）是一个以写作为核心体验的 Markdown 编辑器：打开即写，渲染态直接点选内容即可修改，不必在源码与预览之间来回切换。编辑器内核基于 Milkdown（ProseMirror）在 WebView 中运行，Flutter 侧负责文件管理、版本历史、云同步等能力，两者通过消息桥接协同工作。
 
-## 核心功能
+## 功能特性
 
 ### 编辑与预览
 
@@ -59,7 +41,7 @@
 - 底部格式工具栏只在编辑态出现，提供标题、粗斜体、删除线、列表、引用、代码、表格等常用格式的一键插入。
 - 目录面板支持「跳转后保持打开」连续跳章节；全文搜索支持区分大小写、全词匹配与正则，并保留搜索历史。
 - 代码块支持常见语言的语法高亮、语言选择，以及 One Dark / One Light / GitHub / Nord / Material 等代码块主题（可自动跟随明暗）。
-- 支持数学公式（KaTeX 行内与块级）、表格增删行列、任务列表与 Emoji 短代码。
+- 支持数学公式（KaTeX 行内与块级）、表格增删行列、任务列表与 Emoji 短代码，以及 Mermaid 图表与脚注。
 - 自动保存可开关并设置 15–600 秒间隔，退出时是否保存可单独设置；标题栏实时显示字符、文字与单词统计。
 - 宽屏（平板 / 桌面）自动改用独立导航布局，桌面端另有自定义标题栏与快捷键帮助。
 - 版本历史：每次保存生成快照，可查看任意版本的行级差异，并回退、加备注、删除或另存为新文档。
@@ -90,9 +72,32 @@
 
 - 云同步支持 WebDAV 与 FTP，可测试连接、指定云端目录与路径前缀。
 - 支持手动「立即同步」，也可开启保存文件时自动同步（默认关闭）。
-- 同步前提供预览与冲突处理：逐个文件选择保留本地、保留云端或跳过。
+- 同步前提供预览与冲突处理：逐个文件选择保留本地、保留云端或跳过，冲突时还支持三方合并。
 - 服务器密码保存在系统加密存储中，不以明文写入普通偏好设置。
 - 导出与分享：PDF、按文档内容合成长图、原始文件分享，文件夹可打包为 ZIP。
+
+## 优化成果（T-01 ~ T-14）
+
+本项目按照 [优化路线图](docs/OPTIMIZATION_ROADMAP.md) 完成多轮性能、可靠性与工程质量优化：
+
+| 编号 | 主题 | 成果 |
+| --- | --- | --- |
+| T-01 | 版本快照去重与保留策略 | 快照去重、容量上限保留策略，避免无限增长污染工作区 |
+| T-02 | 云同步台账三方比较与并发传输 | SHA-256 内容哈希台账、并发传输、指数退避重试、断点续传 |
+| T-03 | 应用内更新完整性校验 | checksums 校验、SHA-256 校验、包身份/签名/防降级三重校验，代理仅限 https |
+| T-04 | WebView 安全加固 | CSP 替代可绕过正则、JS→Flutter 消息 19 种白名单 |
+| T-05 | 启动路径优化 | 首帧前串行等待从 4 项减至 2 项，延后非必需初始化 |
+| T-06 | 编辑变更行级增量回写 | 大文档（>50KB）按行级 patch 增量回写，单次消息 < 4KB |
+| T-07 | 目录扫描移入 isolate | 递归扫描 + 逐文件 stat 移入独立 isolate，建立内存索引 |
+| T-08 | 版本对比 patience diff | 移除 O(n·m) LCS 矩阵，5000 行典型对比耗时 < 200ms |
+| T-09 | 拆分 God class | 编辑器三服务抽取、设置项按领域拆分为四个子 Provider（门面模式） |
+| T-10 | CI 质量门禁与正式签名 | 补质量门禁与正式签名流程 |
+| T-11 | Mermaid 与脚注支持 | 编辑器支持 Mermaid 图表与脚注渲染 |
+| T-12 | 全局工作区搜索 | 复用内存索引 + isolate 全文 grep，可随时取消 |
+| T-13 | 版本历史管理页 | 保留数量/容量上限配置、快照列表与一键清理 |
+| T-14 | 同步冲突三方合并 | 基于 base 哈希的三路合并，冲突块逐块交互选择 |
+
+> 完整细节见 [docs/OPTIMIZATION_ROADMAP.md](docs/OPTIMIZATION_ROADMAP.md)。
 
 ## 截图展示
 
@@ -103,29 +108,29 @@
 | 快捷操作与胶囊导航 | 渲染态标题、列表、代码块与表格 | 外观 / 编辑器 / 云同步 / 存储 / 关于 |
 | <img src="sample/1.png" alt="home" style="zoom: 40%;" /> | <img src="sample/2.png" alt="editor" style="zoom: 40%;" /> | <img src="sample/3.png" alt="settings" style="zoom: 40%;" /> |
 
-## 安装
+## 下载与安装
 
 ### Android
 
-1. 前往 [Releases](https://github.com/jiuxina/ushio-md/releases) 按设备架构选择 APK：
-   - `arm64-v8a`：近几年的绝大多数手机与平板
-   - `armeabi-v7a`：较老的 32 位 ARM 设备
-   - `x86_64`：模拟器与部分 x86 平板
-   - `universal`：不确定架构时选它（体积更大）
-2. 安装后按引导页授予文件访问权限。
-3. 首次启动会预热编辑器内核，稍等片刻即可流畅打开文档；建议先在 设置 → 存储 中确认工作区位置。
+请前往 [Releases](https://github.com/1700563146/SAT0markdownEditor/releases) 下载 **Release v1.6.9**，按设备架构选择 APK：
 
-**应用内更新**：设置 → 关于 中可手动检查更新、选择更新渠道（稳定版 / 预览版）、开启启动时自动检查。下载偏慢时可在「下载代理」里添加你自己的加速前缀，汐会按列表顺序依次尝试（页面里的示例地址仅为格式参考，不可直接使用）。
+- `arm64-v8a`：近几年的绝大多数手机与平板
+- `armeabi-v7a`：较老的 32 位 ARM 设备
+- `x86_64`：模拟器与部分 x86 平板
+- `universal`：不确定架构时选它（体积更大）
+
+安装后按引导页授予文件访问权限。首次启动会预热编辑器内核，稍等片刻即可流畅打开文档；建议先在 设置 → 存储 中确认工作区位置。
+
+**应用内更新**：设置 → 关于 中可手动检查更新、选择更新渠道（稳定版 / 预览版）、开启启动时自动检查。下载偏慢时可在「下载代理」里添加你自己的加速前缀。
 
 ### Windows
 
-Windows 版仍在完善中，暂未发布安装包；如需体验可按下方「开发者构建」自行编译。
+Windows 版仍在完善中，暂未发布安装包；如需体验可按下方「构建方式」自行编译。
 
-**系统要求:**
-- Windows 10/11 (64-bit)
-- WebView2 运行时 (Windows 11 默认包含)
+## 构建方式
 
-**开发者构建:**
+**系统要求（Windows 构建）：** Windows 10/11 (64-bit) + WebView2 运行时 (Windows 11 默认包含)。
+
 ```batch
 # 构建 Android（按 ABI 分包 + 通用包）
 build_abi_release.bat
@@ -179,10 +184,12 @@ build_debug.bat
 | 行内公式 | `$E=mc^2$` | KaTeX 行内渲染 |
 | 块级公式 | `$$E=mc^2$$` | KaTeX 块级渲染 |
 | Emoji | `:smile:` / 😀 | Emoji 输入与渲染 |
+| Mermaid 图表 | <code>```mermaid<br>graph TD; A-->B<br>```</code> | Mermaid 图表渲染 |
+| 脚注 | `文字[^1]` | 脚注引用与列表 |
 | HTML 行内标签 | `<kbd>Ctrl</kbd>` | 安全 HTML 渲染 |
 | HTML 块 | `<table>...</table>` | 常见块级 HTML 渲染 |
 
-> 说明：HTML 渲染会过滤危险标签与事件属性；支持 `table`、`div`、`section`、`article`、`details`、`figure` 等常见块级标签。暂不渲染 Mermaid 图与脚注（Mermaid 代码块会按普通代码块高亮显示）。
+> 说明：HTML 渲染会过滤危险标签与事件属性；支持 `table`、`div`、`section`、`article`、`details`、`figure` 等常见块级标签。
 
 ## 常见问题
 
@@ -200,7 +207,7 @@ WebDAV 同步已通过本地自建服务器的上传、下载与冲突处理验�
 
 ### 长文档打开或编辑卡顿怎么办？
 
-编辑器内核已在启动时预热并在文档间复用，正常情况下打开长文只需一次渲染。如果仍然偏慢，可降低背景图片的模糊强度、减少同时打开的文档数量，并保持应用在最新版本。
+编辑器内核已在启动时预热并在文档间复用，正常情况下打开长文只需一次渲染；大文档的编辑变更采用行级增量回写，避免整篇重传。如果仍然偏慢，可降低背景图片的模糊强度、减少同时打开的文档数量，并保持应用在最新版本。
 
 ### 下载更新很慢或失败怎么办？
 
@@ -208,28 +215,10 @@ WebDAV 同步已通过本地自建服务器的上传、下载与冲突处理验�
 
 ## 反馈与支持
 
-欢迎通过 [Issues](https://github.com/jiuxina/ushio-md/issues) 提交问题和建议。
+欢迎通过 [Issues](https://github.com/1700563146/SAT0markdownEditor/issues) 提交问题和建议。
 
 如果这个项目对你有帮助，也欢迎点个 Star 支持一下。
 
-## 版本计划
-
-- **主版本号 (1.0.0)**：仅在大变更或重大功能更新时更新
-- **次版本号 (0.1.0)**：不定期更新，包含较多新功能和改进
-- **修订号 (0.0.1)**：不定期更新，包含 bug 修复和小改进
-
 ## 开源协议
 
-[MIT License](https://github.com/jiuxina/ushio-md/blob/main/LICENSE)
-
-------
-
-<div align="center">
-
-[![Star History Chart](https://api.star-history.com/svg?repos=jiuxina/ushio-md&type=Date)](https://star-history.com/#jiuxina/ushio-md&Date)
-
-</div>
-
-## 赞助支持
-
-如果这个项目对你有帮助，欢迎通过 [爱发电](https://ifdian.net/a/jiuxina) 赞助支持我。
+[MIT License](https://github.com/1700563146/SAT0markdownEditor/blob/main/LICENSE)
