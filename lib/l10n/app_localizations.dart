@@ -101,7 +101,7 @@ abstract class AppLocalizations {
   /// 应用名称
   ///
   /// In zh, this message translates to:
-  /// **'汐'**
+  /// **'沢'**
   String get appName;
 
   /// 取消按钮

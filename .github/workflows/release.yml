@@ -156,9 +156,9 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: 汐 v${{ steps.get_version.outputs.VERSION }}
+          name: 沢 v${{ steps.get_version.outputs.VERSION }}
           body: |
-            ## 🎉 汐 (Ushio) v${{ steps.get_version.outputs.VERSION }}
+            ## 🎉 沢 (Ushio) v${{ steps.get_version.outputs.VERSION }}
             
             ### 📝 更新内容
             

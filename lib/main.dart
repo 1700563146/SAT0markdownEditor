@@ -1,5 +1,5 @@
 // ============================================================================
-// 汐 - Markdown 编辑器
+// 沢 - Markdown 编辑器
 // ============================================================================
 //
 // 一款简洁优雅的移动端 Markdown 编辑器应用。
@@ -62,7 +62,7 @@ void main() async {
       backgroundColor: Colors.transparent,
       skipTaskbar: false,
       titleBarStyle: TitleBarStyle.hidden,
-      title: '汐',
+      title: '沢',
     );
 
     await windowManager.waitUntilReadyToShow(windowOptions, () async {

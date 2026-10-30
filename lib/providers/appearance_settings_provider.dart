@@ -124,7 +124,7 @@ class AppearanceSettingsProvider extends ChangeNotifier
   String? _homeIconCustomPath;
 
   /// 主页左上角标题文字
-  String _homeTitleText = '汐';
+  String _homeTitleText = '沢';
 
   // ==================== 语言设置 ====================
 
@@ -395,7 +395,7 @@ class AppearanceSettingsProvider extends ChangeNotifier
     _appIconIndex = prefs.getInt('app_icon_index') ?? 0;
     _homeIconMode = prefs.getString('home_icon_mode') ?? 'default';
     _homeIconCustomPath = prefs.getString('home_icon_custom_path');
-    _homeTitleText = prefs.getString('home_title_text') ?? '汐';
+    _homeTitleText = prefs.getString('home_title_text') ?? '沢';
 
     // 夜间主题和字体设置
     _darkThemeIndex = prefs.getInt('dark_theme_index') ?? 0;

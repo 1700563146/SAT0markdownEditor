@@ -1,13 +1,13 @@
-; 汐 Markdown 编辑器 - Windows 安装脚本
+; 沢 Markdown 编辑器 - Windows 安装脚本
 ; 版本: 1.5.12
 ; 使用 Inno Setup 编译
 
-#define MyAppName "汐"
+#define MyAppName "沢"
 #define MyAppNameEn "Ushio"
 #define MyAppVersion "1.5.12"
-#define MyAppPublisher "汐 Markdown Editor"
+#define MyAppPublisher "沢 Markdown Editor"
 #define MyAppURL "https://github.com/jiuxina/ushio-md"
-#define MyAppExeName "汐.exe"
+#define MyAppExeName "沢.exe"
 
 [Setup]
 ; 应用信息
@@ -26,7 +26,7 @@ DefaultGroupName={#MyAppName}
 
 ; 输出设置
 OutputDir=installer
-OutputBaseFilename=汐-Setup-{#MyAppVersion}
+OutputBaseFilename=沢-Setup-{#MyAppVersion}
 SetupIconFile=app.ico
 Compression=lzma2
 SolidCompression=yes
@@ -60,7 +60,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 ; 主程序
-Source: "build\windows\x64\runner\Release\汐.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "build\windows\x64\runner\Release\沢.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Flutter 引擎
 Source: "build\windows\x64\runner\Release\flutter_windows.dll"; DestDir: "{app}"; Flags: ignoreversion

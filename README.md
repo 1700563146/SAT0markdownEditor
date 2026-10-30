@@ -1,7 +1,18 @@
-# SAT0markdownEditor（汐）— 专注写作体验的 Markdown 编辑器
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: bd18877955418ac982ba109369444e03_26977ebfd43d11f1a97752540064ee0f
+    ReservedCode1: 3CLPrujPq26j9dPYirfNWh4NWrpHNcCL40tJ008lBaSO6k/YbN0PHlC7Li0d8ByPBK7iitK9NMQ80cXkpzA7NFsqYF8EdZ2zeG48jSyOXXkrAfgnkgGnR/Fqo7o8vLMijrwRIpGVo3kxVVqAy089KHdUGA9qfQn76pHmjK0Gobejmn6vdwqXxvfskOY=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: bd18877955418ac982ba109369444e03_26977ebfd43d11f1a97752540064ee0f
+    ReservedCode2: 3CLPrujPq26j9dPYirfNWh4NWrpHNcCL40tJ008lBaSO6k/YbN0PHlC7Li0d8ByPBK7iitK9NMQ80cXkpzA7NFsqYF8EdZ2zeG48jSyOXXkrAfgnkgGnR/Fqo7o8vLMijrwRIpGVo3kxVVqAy089KHdUGA9qfQn76pHmjK0Gobejmn6vdwqXxvfskOY=
+---
+
+# SAT0markdownEditor（沢）— 专注写作体验的 Markdown 编辑器
 
 <p align="center">
-  <img src="assets/logo.jpg" width="180" alt="汐 Logo">
+  <img src="assets/logo.jpg" width="180" alt="沢 Logo">
 </p>
 
 <p align="center">
@@ -30,7 +41,7 @@
 
 ## 项目简介
 
-SAT0markdownEditor（应用名「汐」）是一个以写作为核心体验的 Markdown 编辑器：打开即写，渲染态直接点选内容即可修改，不必在源码与预览之间来回切换。编辑器内核基于 Milkdown（ProseMirror）在 WebView 中运行，Flutter 侧负责文件管理、版本历史、云同步等能力，两者通过消息桥接协同工作。
+SAT0markdownEditor（应用名「沢」）是一个以写作为核心体验的 Markdown 编辑器：打开即写，渲染态直接点选内容即可修改，不必在源码与预览之间来回切换。编辑器内核基于 Milkdown（ProseMirror）在 WebView 中运行，Flutter 侧负责文件管理、版本历史、云同步等能力，两者通过消息桥接协同工作。
 
 ## 功能特性
 
@@ -55,7 +66,7 @@ SAT0markdownEditor（应用名「汐」）是一个以写作为核心体验的 M
 - 打开外部 Markdown 时可选两种方式：
   - 仅查看（不改动原文件）
   - 导入工作区（会一并复制文中引用的图片）
-- 也可以直接从系统分享面板把文件分享给汐。
+- 也可以直接从系统分享面板把文件分享给沢。
 
 ### 个性化外观
 
@@ -160,7 +171,7 @@ build_debug.bat
 | 存储读写权限 | 读取、保存和管理 Markdown 文件 |
 | 管理所有文件（Android 11+） | 访问你指定的工作区与外部目录 |
 
-> 未授予时应用会停在引导页，授予后自动进入首页。汐不会上传你的文件内容，除非你主动配置并执行云同步。
+> 未授予时应用会停在引导页，授予后自动进入首页。沢不会上传你的文件内容，除非你主动配置并执行云同步。
 
 ## Markdown 支持
 
@@ -203,7 +214,7 @@ WebDAV 同步已通过本地自建服务器的上传、下载与冲突处理验�
 
 ### 误删或改错了内容怎么恢复？
 
-打开文档菜单的「查看历史」，汐会为每次保存留下快照。选中任意版本即可看到逐行差异，可以直接回退，也可以先另存为新文档再对比取舍。
+打开文档菜单的「查看历史」，沢会为每次保存留下快照。选中任意版本即可看到逐行差异，可以直接回退，也可以先另存为新文档再对比取舍。
 
 ### 长文档打开或编辑卡顿怎么办？
 
@@ -211,7 +222,7 @@ WebDAV 同步已通过本地自建服务器的上传、下载与冲突处理验�
 
 ### 下载更新很慢或失败怎么办？
 
-在 设置 → 关于 → 下载代理 中添加你自己的加速前缀（形如 `https://` 开头的地址），汐会按列表顺序依次尝试，全部失败时回退到原始地址。检查更新本身不经过代理，只有 APK 下载会。
+在 设置 → 关于 → 下载代理 中添加你自己的加速前缀（形如 `https://` 开头的地址），沢会按列表顺序依次尝试，全部失败时回退到原始地址。检查更新本身不经过代理，只有 APK 下载会。
 
 ## 反馈与支持
 
@@ -222,3 +233,4 @@ WebDAV 同步已通过本地自建服务器的上传、下载与冲突处理验�
 ## 开源协议
 
 [MIT License](https://github.com/1700563146/SAT0markdownEditor/blob/main/LICENSE)
+*（内容由AI生成，仅供参考）*

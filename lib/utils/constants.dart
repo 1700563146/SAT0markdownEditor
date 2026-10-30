@@ -63,7 +63,7 @@ class AppConstants {
   // ==================== 应用信息 ====================
 
   /// 应用名称
-  static const String appName = '汐';
+  static const String appName = '沢';
 
   /// 版本号。运行时在 main() 中由 package_info_plus 覆盖为 pubspec 的真实版本，
   /// 这里的值仅作为读取失败时的兜底默认，应与 pubspec.yaml 保持一致。
