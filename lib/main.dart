@@ -20,14 +20,12 @@
 // ============================================================================
 
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:provider/provider.dart';
-import 'package:window_manager/window_manager.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import 'l10n/app_localizations.dart';
@@ -50,26 +48,6 @@ import 'utils/theme_tones.dart';
 void main() async {
   // 确保 Flutter 引擎初始化完成（异步操作前必须调用）
   WidgetsFlutterBinding.ensureInitialized();
-
-  // 初始化窗口管理器（仅桌面端）
-  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-    await windowManager.ensureInitialized();
-
-    const windowOptions = WindowOptions(
-      size: Size(1280, 720),
-      minimumSize: Size(800, 600),
-      center: true,
-      backgroundColor: Colors.transparent,
-      skipTaskbar: false,
-      titleBarStyle: TitleBarStyle.hidden,
-      title: '沢',
-    );
-
-    await windowManager.waitUntilReadyToShow(windowOptions, () async {
-      await windowManager.show();
-      await windowManager.focus();
-    });
-  }
 
   // 初始化"我的文件"工作区（创建 Taku-MD 目录）
   // 加 3s 超时与失败兜底：磁盘慢/异常时不再无限卡死启动；

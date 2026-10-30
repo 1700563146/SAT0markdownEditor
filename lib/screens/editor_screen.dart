@@ -12,7 +12,6 @@ import '../providers/settings_provider.dart';
 import '../utils/constants.dart';
 import '../utils/debouncer.dart';
 import '../utils/editor_navigation_helper.dart';
-import '../widgets/custom_title_bar.dart';
 import '../widgets/markdown_toolbar.dart';
 import '../widgets/milkdown_webview_editor.dart';
 import '../models/toc_item.dart';
@@ -700,10 +699,6 @@ class _EditorScreenState extends State<EditorScreen>
         setState(() => _sessionController.isAutoSaving = false);
       }
     }
-  }
-
-  String _normalizeLineEndings(String text) {
-    return _sessionController.normalizeLineEndings(text);
   }
 
   Future<void> _saveFile({
@@ -2328,9 +2323,6 @@ class _EditorScreenState extends State<EditorScreen>
         _mode == EditorMode.edit ||
         _editingBlockIndex != null ||
         _isMilkdownEditorFocused;
-    final useCustomTitleBar =
-        Platform.isWindows || Platform.isLinux || Platform.isMacOS;
-
     return PopScope(
       canPop: !_sessionController.isModified && !hasActiveEditingSurface,
       onPopInvokedWithResult: (didPop, result) async {
@@ -2361,8 +2353,6 @@ class _EditorScreenState extends State<EditorScreen>
               Positioned.fill(child: RepaintBoundary(child: editorBackground)),
             Column(
               children: [
-                if (useCustomTitleBar)
-                  CustomTitleBar(fileName: fileName, isEditorMode: true),
                 Expanded(
                   child: CallbackShortcuts(
                     bindings: buildShortcutBindings(

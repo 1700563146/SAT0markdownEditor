@@ -13,7 +13,6 @@ import '../utils/app_style.dart';
 import '../utils/editor_navigation_helper.dart';
 import '../utils/file_import_helper.dart';
 import '../widgets/app_background.dart';
-import '../widgets/custom_title_bar.dart';
 import '../widgets/milkdown_warmup_view.dart';
 import '../widgets/milkdown_webview_editor.dart';
 import '../widgets/themed_feedback.dart';
@@ -275,10 +274,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
           return PermissionScreen(fileProvider: fileProvider);
         }
 
-        // 桌面端使用自定义标题栏
-        final useCustomTitleBar =
-            Platform.isWindows || Platform.isLinux || Platform.isMacOS;
-
         final isDesktopLayout = ResponsiveLayout.isDesktopWidth(context);
         final settings = context.watch<SettingsProvider>();
         final capsuleFloating =
@@ -289,8 +284,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
           children: [
             Column(
               children: [
-                if (useCustomTitleBar)
-                  const CustomTitleBar(isEditorMode: false),
                 Expanded(
                   child: isDesktopLayout
                       ? _buildDesktopKeyboardScope(

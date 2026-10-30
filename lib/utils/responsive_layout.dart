@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import 'platform_adapter.dart';
 
 enum AppLayoutClass { compact, medium, desktop, wideDesktop }
 
@@ -11,9 +10,8 @@ class ResponsiveLayout {
 
   static AppLayoutClass classOf(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
-    final isDesktopPlatform = PlatformAdapter.isDesktop();
 
-    if (!isDesktopPlatform || width <= compactMaxWidth) {
+    if (width <= compactMaxWidth) {
       return AppLayoutClass.compact;
     }
     if (width < desktopMinWidth) {

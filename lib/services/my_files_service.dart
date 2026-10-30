@@ -50,10 +50,7 @@ class MyFilesService {
   /// - 我们需要使用公共 Documents 目录来支持云同步
   /// - 通过请求存储权限或使用 SAF 来访问
   Future<Directory?> _getDefaultDocumentsDirectory() async {
-    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-      // 桌面平台：使用文档目录
-      return await getApplicationDocumentsDirectory();
-    } else if (Platform.isAndroid) {
+    if (Platform.isAndroid) {
       // Android：尝试使用公共 Documents 目录
       // 在 Android 10+ 需要特殊处理
       return await _getAndroidDocumentsDirectory();
@@ -124,7 +121,6 @@ class MyFilesService {
   /// 获取工作区根路径
   ///
   /// 默认工作区：
-  /// - Windows/macOS/Linux: ~/Documents/Taku-md
   /// - Android: /storage/emulated/0/Documents/Taku-md (公共目录)
   /// - iOS: App Documents/Taku-md
   /// 或用户自定义的基础路径下
@@ -202,10 +198,8 @@ class MyFilesService {
     }
     
     // 检查路径是否以工作区路径开头
-    // 使用规范化比较，防止大小写差异（Windows）
-    final isWindows = Platform.isWindows;
-    final filePathCheck = isWindows ? normalizedFilePath.toLowerCase() : normalizedFilePath;
-    final workspacePathCheck = isWindows ? normalizedWorkspacePath.toLowerCase() : normalizedWorkspacePath;
+    final filePathCheck = normalizedFilePath;
+    final workspacePathCheck = normalizedWorkspacePath;
     
     if (!filePathCheck.startsWith(workspacePathCheck)) {
       return false;
@@ -232,7 +226,7 @@ class MyFilesService {
         realFilePath = normalizedFilePath;
       }
       
-      final realFilePathCheck = isWindows ? realFilePath.toLowerCase() : realFilePath;
+      final realFilePathCheck = realFilePath;
       return realFilePathCheck.startsWith(workspacePathCheck);
     } catch (e) {
       appDebugLog('MyFilesService: 路径安全检查失败: $e');

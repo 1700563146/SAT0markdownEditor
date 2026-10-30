@@ -15,10 +15,6 @@ class PlatformAdapter {
       }
       // 回退到硬编码路径（兼容性）
       return '/storage/emulated/0/Documents';
-    } else if (Platform.isWindows) {
-      // Windows: 使用用户文档目录
-      final docsDir = await getApplicationDocumentsDirectory();
-      return docsDir.path;
     } else if (Platform.isMacOS) {
       // macOS: 使用用户文档目录
       final docsDir = await getApplicationDocumentsDirectory();
@@ -42,7 +38,6 @@ class PlatformAdapter {
   static String getPlatformName() {
     if (Platform.isAndroid) return 'Android';
     if (Platform.isIOS) return 'iOS';
-    if (Platform.isWindows) return 'Windows';
     if (Platform.isMacOS) return 'macOS';
     if (Platform.isLinux) return 'Linux';
     if (Platform.isFuchsia) return 'Fuchsia';
@@ -52,11 +47,6 @@ class PlatformAdapter {
   /// 检查是否是移动平台
   static bool isMobile() {
     return Platform.isAndroid || Platform.isIOS;
-  }
-
-  /// 检查是否是桌面平台
-  static bool isDesktop() {
-    return Platform.isWindows || Platform.isLinux || Platform.isMacOS;
   }
 
   /// 获取应用数据目录
@@ -82,40 +72,6 @@ class PlatformAdapter {
   static String? getDownloadsDirectoryPath() {
     if (Platform.isAndroid) {
       return '/storage/emulated/0/Download';
-    } else if (Platform.isWindows) {
-      // Windows: 通常在用户目录下的 Downloads
-      final home = Platform.environment['USERPROFILE'];
-      if (home != null) {
-        return '$home\\Downloads';
-      }
-    } else if (Platform.isLinux) {
-      // Linux: 通常在用户目录下的 Downloads
-      final home = Platform.environment['HOME'];
-      if (home != null) {
-        return '$home/Downloads';
-      }
-    } else if (Platform.isMacOS) {
-      // macOS: 通常在用户目录下的 Downloads
-      final home = Platform.environment['HOME'];
-      if (home != null) {
-        return '$home/Downloads';
-      }
-    }
-    return null;
-  }
-
-  /// 获取桌面目录路径(如果可用)
-  static String? getDesktopDirectoryPath() {
-    if (Platform.isWindows) {
-      final home = Platform.environment['USERPROFILE'];
-      if (home != null) {
-        return '$home\\Desktop';
-      }
-    } else if (Platform.isLinux || Platform.isMacOS) {
-      final home = Platform.environment['HOME'];
-      if (home != null) {
-        return '$home/Desktop';
-      }
     }
     return null;
   }

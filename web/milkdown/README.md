@@ -27,10 +27,10 @@ npm install
 npm run build
 ```
 
-在仓库根目录同步产物（Windows）：
+在仓库根目录同步产物：
 
-```bat
-copy /Y web\milkdown\dist\index.html assets\milkdown_web\index.html
+```bash
+cp web/milkdown/dist/index.html assets/milkdown_web/index.html
 ```
 
 推荐发布方式：

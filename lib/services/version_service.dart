@@ -749,16 +749,11 @@ class VersionService {
   /// 原子写入
   ///
   /// 先写入临时文件，再重命名，确保写入过程的原子性。
-  /// Windows 上需先删除目标文件再重命名。
   Future<void> _atomicWrite(String path, String content) async {
-    final file = File(path);
     final tempFile = File('$path.tmp');
 
     try {
       await tempFile.writeAsString(content, flush: true);
-      if (Platform.isWindows && await file.exists()) {
-        await file.delete();
-      }
       await tempFile.rename(path);
     } catch (e) {
       // 清理临时文件

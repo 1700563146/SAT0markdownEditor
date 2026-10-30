@@ -610,10 +610,6 @@ class FileService {
     final tempFile = File('$path.tmp');
     try {
       await tempFile.writeAsString(content, flush: true);
-      // On Windows, rename fails if target exists; delete first
-      if (Platform.isWindows && await file.exists()) {
-        await file.delete();
-      }
       await tempFile.rename(path);
     } catch (e) {
       // Clean up temp file on failure

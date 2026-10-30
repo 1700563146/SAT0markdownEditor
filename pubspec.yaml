@@ -14,8 +14,6 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # In iOS, build-name is used as CFBundleShortVersionString while build-number is used as CFBundleVersion.
 # Read more about iOS versioning at
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
-# In Windows, build-name is used as the major, minor, and patch parts
-# of the product and file versions while build-number is used as the build suffix.
 version: 1.6.9+4105
 
 environment:
@@ -86,9 +84,6 @@ dependencies:
   package_info_plus: ^9.0.0
   mime: ^2.0.0
   
-  # Window management for desktop
-  window_manager: ^0.4.3
-  
   # Monet color extraction (Material You dynamic color)
   material_color_utilities: ^0.13.0
   liquid_glass_widgets: ^1.11.0
@@ -119,10 +114,6 @@ flutter_launcher_icons:
   ios: false
   image_path: "app.png"
   min_sdk_android: 21
-  windows:
-    generate: true
-    image_path: "app.png"
-    icon_size: 256
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
